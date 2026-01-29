@@ -1,0 +1,18 @@
+{
+  "name": "mcp-project-tracker",
+  "version": "1.0.0",
+  "description": "MCP Server for tracking AI-in-a-Box portfolio projects",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "seed": "node seed.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "nodemailer": "^6.9.8"
+  }
+}
