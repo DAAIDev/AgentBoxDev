@@ -2,16 +2,22 @@ import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import nodemailer from 'nodemailer';
+import Anthropic from '@anthropic-ai/sdk';
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
 );
+
+// Anthropic client
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY
+});
 
 // Email transporter (Gmail)
 const transporter = nodemailer.createTransport({
@@ -21,6 +27,27 @@ const transporter = nodemailer.createTransport({
     pass: process.env.GMAIL_APP_PASSWORD
   }
 });
+
+// ============ SYSTEM PROMPT FOR CHAT ============
+const SYSTEM_PROMPT = `You are the AI-in-a-Box Dev Dashboard assistant. You help the Digital Alpha team manage AI implementations across their portfolio companies.
+
+You have access to tools that let you:
+- View and update company status, milestones, and requirements
+- Track dev tasks and assignments  
+- Manage documents and files
+- Send emails and project updates
+- View activity logs
+
+Current portfolio companies:
+- DTIQ (video surveillance, loss prevention) - Zendesk, Salesforce, ChurnZero
+- Element 8 / ATLINK (ISP, wireless broadband) - Powercode, PowerNOC, WISDM, etc
+- QWILT (CDN, edge computing) - Slack-based support
+- PacketFabric (network connectivity) - ServiceNow
+- Welink (ISP, similar to Element 8) - Discovery phase
+
+Be concise and direct. Use tools to get real data - don't guess.
+When you complete an action, confirm what you did.
+For sending emails, confirm the recipient and content first.`;
 
 // ============ TOOL DEFINITIONS ============
 const tools = [
@@ -221,6 +248,61 @@ const tools = [
         include_details: { type: "boolean", description: "Include detailed milestones and requirements (default: false)" }
       },
       required: ["to"]
+    }
+  },
+  // ============ DEV TASKS TOOLS ============
+  {
+    name: "list_dev_tasks",
+    description: "List dev tasks, optionally filtered by status, assignee, or priority",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["todo", "in_progress", "blocked", "done"], description: "Filter by status" },
+        assigned_to: { type: "string", description: "Filter by assignee name" },
+        priority: { type: "string", enum: ["high", "medium", "low"], description: "Filter by priority" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "add_dev_task",
+    description: "Add a new dev task with optional step-by-step instructions",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Task title" },
+        description: { type: "string", description: "Task description" },
+        assigned_to: { type: "string", description: "Who is responsible" },
+        priority: { type: "string", enum: ["high", "medium", "low"], description: "Priority level" },
+        steps: { type: "array", items: { type: "string" }, description: "Step-by-step instructions" },
+        due_date: { type: "string", description: "Due date (YYYY-MM-DD)" }
+      },
+      required: ["title"]
+    }
+  },
+  {
+    name: "update_dev_task",
+    description: "Update a dev task's status, assignee, or priority",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task UUID" },
+        status: { type: "string", enum: ["todo", "in_progress", "blocked", "done"], description: "New status" },
+        assigned_to: { type: "string", description: "New assignee" },
+        priority: { type: "string", enum: ["high", "medium", "low"], description: "New priority" }
+      },
+      required: ["task_id"]
+    }
+  },
+  {
+    name: "delete_dev_task",
+    description: "Delete a dev task",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task UUID" }
+      },
+      required: ["task_id"]
     }
   }
 ];
@@ -604,8 +686,155 @@ const handlers = {
     });
     
     return { success: true, message: `Portfolio update sent to ${to}` };
+  },
+
+  // ============ DEV TASKS HANDLERS ============
+  async list_dev_tasks({ status, assigned_to, priority }) {
+    let query = supabase
+      .from('dev_tasks')
+      .select('*, companies(name, slug)')
+      .order('priority')
+      .order('due_date');
+    
+    if (status) query = query.eq('status', status);
+    if (assigned_to) query = query.eq('assigned_to', assigned_to);
+    if (priority) query = query.eq('priority', priority);
+    
+    const { data, error } = await query;
+    if (error) throw error;
+    return data;
+  },
+
+  async add_dev_task({ title, description, assigned_to, priority, steps, due_date }) {
+    const { data, error } = await supabase
+      .from('dev_tasks')
+      .insert({
+        title,
+        description,
+        assigned_to,
+        priority: priority || 'medium',
+        steps: steps || [],
+        due_date
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    return { success: true, task: data };
+  },
+
+  async update_dev_task({ task_id, status, assigned_to, priority }) {
+    const updates = { updated_at: new Date().toISOString() };
+    if (status) {
+      updates.status = status;
+      if (status === 'done') updates.completed_at = new Date().toISOString();
+    }
+    if (assigned_to) updates.assigned_to = assigned_to;
+    if (priority) updates.priority = priority;
+    
+    const { data, error } = await supabase
+      .from('dev_tasks')
+      .update(updates)
+      .eq('id', task_id)
+      .select()
+      .single();
+    if (error) throw error;
+    return { success: true, task: data };
+  },
+
+  async delete_dev_task({ task_id }) {
+    const { error } = await supabase
+      .from('dev_tasks')
+      .delete()
+      .eq('id', task_id);
+    if (error) throw error;
+    return { success: true, deleted: task_id };
   }
 };
+
+// ============ CHAT ENDPOINT - THE BRAIN ============
+app.post('/chat', async (req, res) => {
+  try {
+    const { message, conversation_history = [] } = req.body;
+    
+    if (!message) {
+      return res.status(400).json({ error: 'Message required' });
+    }
+
+    // Build messages
+    const messages = [
+      ...conversation_history,
+      { role: 'user', content: message }
+    ];
+
+    // Convert tools to Claude format
+    const claudeTools = tools.map(t => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.inputSchema
+    }));
+
+    // Call Claude
+    let response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4096,
+      system: SYSTEM_PROMPT,
+      tools: claudeTools,
+      messages
+    });
+
+    // Tool use loop
+    while (response.stop_reason === 'tool_use') {
+      messages.push({ role: 'assistant', content: response.content });
+
+      const toolResults = [];
+      for (const block of response.content) {
+        if (block.type === 'tool_use') {
+          console.log(`Tool: ${block.name}`, block.input);
+          
+          try {
+            const result = await handlers[block.name](block.input);
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content: JSON.stringify(result)
+            });
+          } catch (err) {
+            console.error(`Tool error (${block.name}):`, err);
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content: JSON.stringify({ error: err.message }),
+              is_error: true
+            });
+          }
+        }
+      }
+
+      messages.push({ role: 'user', content: toolResults });
+
+      response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        system: SYSTEM_PROMPT,
+        tools: claudeTools,
+        messages
+      });
+    }
+
+    // Extract text response
+    const textContent = response.content.find(b => b.type === 'text');
+    const finalResponse = textContent?.text || 'No response';
+
+    res.json({
+      response: finalResponse,
+      conversation_history: messages.concat([{ role: 'assistant', content: response.content }])
+    });
+
+  } catch (error) {
+    console.error('Chat error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ============ MCP ENDPOINTS ============
 
@@ -702,7 +931,8 @@ app.get('/', (req, res) => {
       '/health': 'Health check',
       '/tools': 'List available tools',
       '/tools/:name': 'Execute a tool (POST)',
-      '/mcp': 'MCP protocol endpoint'
+      '/mcp': 'MCP protocol endpoint',
+      '/chat': 'Natural language chat endpoint (POST)'
     }
   });
 });
