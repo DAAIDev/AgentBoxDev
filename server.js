@@ -6,7 +6,7 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));  // Increased for file uploads
+app.use(express.json({ limit: '50mb' }));
 
 // Supabase client
 const supabase = createClient(
@@ -35,6 +35,7 @@ You have access to tools that let you:
 - View and update company status, milestones, and requirements
 - Track dev tasks and assignments  
 - Manage documents and files (upload, list, read content, delete)
+- Track deployments and their components (GitHub, Frontend, MCP Server, Database) with health checks
 - Send emails and project updates
 - View activity logs
 
@@ -50,6 +51,11 @@ DOCUMENT HANDLING:
 - Use get_document_content to read text files (md, txt, json, csv, html, etc)
 - For PDFs and images, provide the URL for the user to view
 - When asked to summarize a document, first get its content, then summarize
+
+DEPLOYMENT HANDLING:
+- Use list_deployments to see all deployments
+- Use get_deployment to see a deployment with all its components
+- Use check_deployment_health to ping URLs and update status
 
 Be concise and direct. Use tools to get real data - don't guess.
 When you complete an action, confirm what you did.
@@ -359,6 +365,98 @@ const tools = [
         document_id: { type: "string", description: "Document UUID" }
       },
       required: ["document_id"]
+    }
+  },
+  // ============ DEPLOYMENT TOOLS ============
+  {
+    name: "list_deployments",
+    description: "List all deployments with their status",
+    inputSchema: { 
+      type: "object", 
+      properties: {
+        status: { type: "string", enum: ["active", "deploying", "failed", "stopped"], description: "Optional filter by status" }
+      },
+      required: [] 
+    }
+  },
+  {
+    name: "get_deployment",
+    description: "Get a deployment with all its components (github, frontend, mcp_server, database)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        slug: { type: "string", description: "Deployment slug" },
+        deployment_id: { type: "string", description: "Or deployment UUID" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "add_deployment",
+    description: "Create a new deployment with optional component URLs",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Deployment name" },
+        description: { type: "string", description: "Optional description" },
+        github_url: { type: "string", description: "GitHub repo URL" },
+        frontend_url: { type: "string", description: "Frontend URL" },
+        mcp_server_url: { type: "string", description: "MCP server URL" },
+        database_type: { type: "string", description: "Database type (PostgreSQL, MySQL, etc.)" },
+        database_provider: { type: "string", description: "Database provider (Supabase, PlanetScale, etc.)" }
+      },
+      required: ["name"]
+    }
+  },
+  {
+    name: "update_deployment",
+    description: "Update deployment name, description, or status",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deployment_id: { type: "string", description: "Deployment UUID" },
+        name: { type: "string", description: "New name" },
+        description: { type: "string", description: "New description" },
+        status: { type: "string", enum: ["active", "deploying", "failed", "stopped"], description: "New status" }
+      },
+      required: ["deployment_id"]
+    }
+  },
+  {
+    name: "update_deployment_component",
+    description: "Update a specific component (github, frontend, mcp_server, database) of a deployment",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deployment_id: { type: "string", description: "Deployment UUID" },
+        component: { type: "string", enum: ["github", "frontend", "mcp_server", "database"], description: "Component type" },
+        status: { type: "string", enum: ["healthy", "degraded", "down", "unknown", "not_configured"], description: "Component status" },
+        url: { type: "string", description: "Component URL" },
+        config: { type: "object", description: "Component-specific config (repo_url, branch, framework, version, etc.)" }
+      },
+      required: ["deployment_id", "component"]
+    }
+  },
+  {
+    name: "delete_deployment",
+    description: "Delete a deployment and all its components",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deployment_id: { type: "string", description: "Deployment UUID" }
+      },
+      required: ["deployment_id"]
+    }
+  },
+  {
+    name: "check_deployment_health",
+    description: "Check health of all components in a deployment by pinging their URLs",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deployment_id: { type: "string", description: "Deployment UUID" }
+      },
+      required: ["deployment_id"]
     }
   }
 ];
@@ -799,7 +897,6 @@ const handlers = {
 
   // ============ DOCUMENT STORAGE HANDLERS ============
   async upload_document({ slug, filename, content_base64, content_type, category, description }) {
-    // Get company ID if not platform/dev
     let company_id = null;
     if (slug !== 'platform' && slug !== 'dev') {
       const { data: company } = await supabase
@@ -811,13 +908,9 @@ const handlers = {
       company_id = company.id;
     }
 
-    // Decode base64
     const buffer = Buffer.from(content_base64, 'base64');
-    
-    // Build path: {slug}/{filename}
     const bucket_path = `${slug}/${filename}`;
     
-    // Upload to Supabase Storage
     const { data: uploadData, error: uploadError } = await supabase.storage
       .from('documents')
       .upload(bucket_path, buffer, {
@@ -827,15 +920,12 @@ const handlers = {
     
     if (uploadError) throw uploadError;
     
-    // Get public URL
     const { data: urlData } = supabase.storage
       .from('documents')
       .getPublicUrl(bucket_path);
     
-    // Determine file type from extension
     const ext = filename.split('.').pop().toLowerCase();
     
-    // Insert into documents table
     const { data: doc, error: dbError } = await supabase
       .from('documents')
       .insert({
@@ -862,7 +952,6 @@ const handlers = {
   },
 
   async get_document_content({ document_id }) {
-    // Get document metadata
     const { data: doc, error } = await supabase
       .from('documents')
       .select('*, companies(name, slug)')
@@ -872,7 +961,6 @@ const handlers = {
     if (error) throw error;
     if (!doc) throw new Error('Document not found');
     
-    // Check if it's a text-readable format
     const textFormats = ['md', 'txt', 'json', 'csv', 'html', 'xml', 'js', 'ts', 'py', 'sql'];
     const ext = doc.file_type?.toLowerCase();
     
@@ -884,13 +972,11 @@ const handlers = {
       };
     }
     
-    // Fetch the file content
     try {
       const response = await fetch(doc.file_url);
       if (!response.ok) throw new Error(`Failed to fetch: ${response.status}`);
       let content = await response.text();
       
-      // Truncate if too long (keep first 50k chars)
       const truncated = content.length > 50000;
       if (truncated) {
         content = content.substring(0, 50000) + '\n\n... [truncated]';
@@ -942,7 +1028,6 @@ const handlers = {
   },
 
   async delete_document({ document_id }) {
-    // Get document to find bucket_path
     const { data: doc } = await supabase
       .from('documents')
       .select('bucket_path')
@@ -950,13 +1035,11 @@ const handlers = {
       .single();
     
     if (doc?.bucket_path) {
-      // Delete from storage
       await supabase.storage
         .from('documents')
         .remove([doc.bucket_path]);
     }
     
-    // Delete from database
     const { error } = await supabase
       .from('documents')
       .delete()
@@ -965,6 +1048,267 @@ const handlers = {
     if (error) throw error;
     
     return { success: true, deleted: document_id };
+  },
+
+  // ============ DEPLOYMENT HANDLERS ============
+  async list_deployments({ status }) {
+    let query = supabase
+      .from('deployments')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    if (status) {
+      query = query.eq('status', status);
+    }
+    
+    const { data, error } = await query;
+    if (error) throw error;
+    return data;
+  },
+
+  async get_deployment({ slug, deployment_id }) {
+    let query = supabase.from('deployments').select('*');
+    
+    if (deployment_id) {
+      query = query.eq('id', deployment_id);
+    } else if (slug) {
+      query = query.eq('slug', slug);
+    } else {
+      throw new Error('Must provide slug or deployment_id');
+    }
+    
+    const { data: deployment, error } = await query.single();
+    if (error) throw error;
+    if (!deployment) throw new Error('Deployment not found');
+    
+    const { data: components, error: compError } = await supabase
+      .from('deployment_components')
+      .select('*')
+      .eq('deployment_id', deployment.id);
+    
+    if (compError) throw compError;
+    
+    const result = { ...deployment };
+    
+    for (const comp of components || []) {
+      result[comp.component_type] = {
+        status: comp.status,
+        url: comp.url,
+        last_checked: comp.last_checked,
+        error_message: comp.error_message,
+        ...comp.config
+      };
+    }
+    
+    return result;
+  },
+
+  async add_deployment({ name, description, github_url, frontend_url, mcp_server_url, database_type, database_provider }) {
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    
+    const { data: existing } = await supabase
+      .from('deployments')
+      .select('id')
+      .eq('slug', slug)
+      .single();
+    
+    if (existing) {
+      throw new Error(`Deployment with slug "${slug}" already exists`);
+    }
+    
+    const { data: deployment, error } = await supabase
+      .from('deployments')
+      .insert({
+        name,
+        slug,
+        description,
+        status: 'active'
+      })
+      .select()
+      .single();
+    
+    if (error) throw error;
+    
+    const components = [
+      {
+        deployment_id: deployment.id,
+        component_type: 'github',
+        status: github_url ? 'unknown' : 'not_configured',
+        url: github_url,
+        config: github_url ? { repo_url: github_url, branch: 'main' } : {}
+      },
+      {
+        deployment_id: deployment.id,
+        component_type: 'frontend',
+        status: frontend_url ? 'unknown' : 'not_configured',
+        url: frontend_url,
+        config: {}
+      },
+      {
+        deployment_id: deployment.id,
+        component_type: 'mcp_server',
+        status: mcp_server_url ? 'unknown' : 'not_configured',
+        url: mcp_server_url,
+        config: {}
+      },
+      {
+        deployment_id: deployment.id,
+        component_type: 'database',
+        status: database_type ? 'unknown' : 'not_configured',
+        url: null,
+        config: {
+          type: database_type || null,
+          provider: database_provider || null
+        }
+      }
+    ];
+    
+    const { error: compError } = await supabase
+      .from('deployment_components')
+      .insert(components);
+    
+    if (compError) throw compError;
+    
+    return await handlers.get_deployment({ deployment_id: deployment.id });
+  },
+
+  async update_deployment({ deployment_id, name, description, status }) {
+    const updates = { updated_at: new Date().toISOString() };
+    if (name) updates.name = name;
+    if (description !== undefined) updates.description = description;
+    if (status) updates.status = status;
+    
+    const { data, error } = await supabase
+      .from('deployments')
+      .update(updates)
+      .eq('id', deployment_id)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    return { success: true, deployment: data };
+  },
+
+  async update_deployment_component({ deployment_id, component, status, url, config }) {
+    const updates = { updated_at: new Date().toISOString() };
+    if (status) updates.status = status;
+    if (url !== undefined) updates.url = url;
+    if (config) {
+      const { data: existing } = await supabase
+        .from('deployment_components')
+        .select('config')
+        .eq('deployment_id', deployment_id)
+        .eq('component_type', component)
+        .single();
+      
+      updates.config = { ...(existing?.config || {}), ...config };
+    }
+    
+    const { data, error } = await supabase
+      .from('deployment_components')
+      .update(updates)
+      .eq('deployment_id', deployment_id)
+      .eq('component_type', component)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    return { success: true, component: data };
+  },
+
+  async delete_deployment({ deployment_id }) {
+    const { error } = await supabase
+      .from('deployments')
+      .delete()
+      .eq('id', deployment_id);
+    
+    if (error) throw error;
+    return { success: true, deleted: deployment_id };
+  },
+
+  async check_deployment_health({ deployment_id }) {
+    const { data: components, error } = await supabase
+      .from('deployment_components')
+      .select('*')
+      .eq('deployment_id', deployment_id);
+    
+    if (error) throw error;
+    
+    const results = {};
+    
+    for (const comp of components || []) {
+      if (!comp.url) {
+        results[comp.component_type] = { status: 'not_configured', checked: false };
+        continue;
+      }
+      
+      try {
+        const startTime = Date.now();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        
+        let checkUrl = comp.url;
+        if (comp.component_type === 'mcp_server') {
+          checkUrl = comp.url.replace(/\/$/, '') + '/health';
+        }
+        
+        const response = await fetch(checkUrl, { 
+          method: 'GET',
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+        
+        const latency = Date.now() - startTime;
+        
+        let newStatus;
+        let errorMessage = null;
+        
+        if (response.ok) {
+          newStatus = latency > 5000 ? 'degraded' : 'healthy';
+        } else {
+          newStatus = 'degraded';
+          errorMessage = `HTTP ${response.status}`;
+        }
+        
+        await supabase
+          .from('deployment_components')
+          .update({
+            status: newStatus,
+            last_checked: new Date().toISOString(),
+            error_message: errorMessage,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', comp.id);
+        
+        results[comp.component_type] = {
+          status: newStatus,
+          latency,
+          checked: true
+        };
+        
+      } catch (err) {
+        await supabase
+          .from('deployment_components')
+          .update({
+            status: 'down',
+            last_checked: new Date().toISOString(),
+            error_message: err.message,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', comp.id);
+        
+        results[comp.component_type] = {
+          status: 'down',
+          error: err.message,
+          checked: true
+        };
+      }
+    }
+    
+    return { deployment_id, health_check: results };
   }
 };
 
@@ -996,7 +1340,6 @@ app.post('/chat', async (req, res) => {
       messages
     });
 
-    // Tool use loop
     while (response.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: response.content });
 
@@ -1049,7 +1392,7 @@ app.post('/chat', async (req, res) => {
   }
 });
 
-// ============ FILE UPLOAD ENDPOINT (for dashboard) ============
+// ============ FILE UPLOAD ENDPOINT ============
 app.post('/upload', async (req, res) => {
   try {
     const { slug, filename, content_base64, content_type, category, description } = req.body;
