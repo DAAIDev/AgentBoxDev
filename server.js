@@ -3,6 +3,7 @@ import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import nodemailer from 'nodemailer';
 import Anthropic from '@anthropic-ai/sdk';
+import { google } from 'googleapis';
 
 const app = express();
 app.use(cors());
@@ -19,7 +20,7 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY
 });
 
-// Email transporter (Gmail)
+// Email transporter (Gmail - for sending)
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -27,6 +28,18 @@ const transporter = nodemailer.createTransport({
     pass: process.env.GMAIL_APP_PASSWORD
   }
 });
+
+// Google OAuth client (for Calendar & Gmail API)
+function getGoogleAuth() {
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  );
+  oauth2Client.setCredentials({
+    refresh_token: process.env.GOOGLE_REFRESH_TOKEN
+  });
+  return oauth2Client;
+}
 
 // ============ SYSTEM PROMPT FOR CHAT ============
 const SYSTEM_PROMPT = `You are the AI-in-a-Box Dev Dashboard assistant. You help the Digital Alpha team manage AI implementations across their portfolio companies.
@@ -36,6 +49,8 @@ You have access to tools that let you:
 - Track dev tasks and assignments  
 - Manage documents and files (upload, list, read content, delete)
 - Track deployments and their components (GitHub, Frontend, MCP Server, Database) with health checks
+- Read Gmail inbox and search emails
+- View Google Calendar events and meetings
 - Send emails and project updates
 - View activity logs
 
@@ -45,6 +60,13 @@ Current portfolio companies:
 - QWILT (CDN, edge computing) - Slack-based support
 - PacketFabric (network connectivity) - ServiceNow
 - Welink (ISP, similar to Element 8) - Discovery phase
+
+EMAIL & CALENDAR:
+- Use list_emails to search/filter emails, can filter by company contacts
+- Use get_email to read full email content
+- Use list_calendar_events to see meetings, can filter by company [slug] prefix
+- Use create_calendar_event to schedule new meetings
+- Calendar events prefixed with [dtiq], [qwilt], etc. are auto-categorized
 
 DOCUMENT HANDLING:
 - Use list_all_documents to see what docs exist
@@ -457,6 +479,63 @@ const tools = [
         deployment_id: { type: "string", description: "Deployment UUID" }
       },
       required: ["deployment_id"]
+    }
+  },
+  // ============ GMAIL TOOLS ============
+  {
+    name: "list_emails",
+    description: "List emails from Gmail. Can filter by company (matches against stored contacts).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        folder: { type: "string", enum: ["inbox", "sent", "drafts", "all"], description: "Folder (default: inbox)" },
+        company_slug: { type: "string", description: "Filter by company (matches contact emails)" },
+        query: { type: "string", description: "Gmail search query" },
+        max_results: { type: "number", description: "Max results (default: 50)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_email",
+    description: "Get full email content including body",
+    inputSchema: {
+      type: "object",
+      properties: {
+        email_id: { type: "string", description: "Email ID" }
+      },
+      required: ["email_id"]
+    }
+  },
+  // ============ CALENDAR TOOLS ============
+  {
+    name: "list_calendar_events",
+    description: "List Google Calendar events. Events with [company-slug] prefix in title are auto-categorized (e.g., '[dtiq] Weekly Standup').",
+    inputSchema: {
+      type: "object",
+      properties: {
+        start_date: { type: "string", description: "Start date ISO format (default: today)" },
+        end_date: { type: "string", description: "End date ISO format (default: 2 weeks out)" },
+        company_slug: { type: "string", description: "Filter by company (matches [slug] prefix in title)" },
+        max_results: { type: "number", description: "Max events (default: 50)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "create_calendar_event",
+    description: "Create a Google Calendar event. Use [company-slug] prefix in title to categorize (e.g., '[dtiq] Demo Call').",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Event title (use [slug] prefix for company events)" },
+        start_time: { type: "string", description: "Start time ISO format (e.g., 2026-01-30T10:00:00)" },
+        end_time: { type: "string", description: "End time ISO format (e.g., 2026-01-30T11:00:00)" },
+        description: { type: "string", description: "Event description" },
+        location: { type: "string", description: "Location or video call link" },
+        attendees: { type: "array", items: { type: "string" }, description: "List of attendee email addresses" }
+      },
+      required: ["title", "start_time", "end_time"]
     }
   }
 ];
@@ -1309,6 +1388,240 @@ const handlers = {
     }
     
     return { deployment_id, health_check: results };
+  },
+
+  // ============ GMAIL HANDLERS ============
+  async list_emails({ folder = 'inbox', company_slug, query, max_results = 50 }) {
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REFRESH_TOKEN) {
+      throw new Error('Google API not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN.');
+    }
+    
+    const auth = getGoogleAuth();
+    const gmail = google.gmail({ version: 'v1', auth });
+    
+    // Get company contact emails if filtering by company
+    let contactEmails = [];
+    if (company_slug) {
+      const { data: company } = await supabase
+        .from('companies')
+        .select('id')
+        .eq('slug', company_slug)
+        .single();
+      
+      if (company) {
+        const { data: contacts } = await supabase
+          .from('contacts')
+          .select('email')
+          .eq('company_id', company.id);
+        
+        contactEmails = contacts?.map(c => c.email).filter(Boolean) || [];
+      }
+    }
+
+    // Build Gmail query
+    let q = query || '';
+    if (folder === 'inbox') q = `in:inbox ${q}`.trim();
+    else if (folder === 'sent') q = `in:sent ${q}`.trim();
+    else if (folder === 'drafts') q = `in:drafts ${q}`.trim();
+
+    const listResponse = await gmail.users.messages.list({
+      userId: 'me',
+      maxResults: max_results,
+      q: q || undefined,
+    });
+
+    const messages = listResponse.data.messages || [];
+    
+    // Fetch message details
+    const emails = await Promise.all(
+      messages.slice(0, 20).map(async (msg) => { // Limit to 20 for speed
+        const detail = await gmail.users.messages.get({
+          userId: 'me',
+          id: msg.id,
+          format: 'metadata',
+          metadataHeaders: ['From', 'To', 'Subject', 'Date'],
+        });
+
+        const headers = detail.data.payload.headers;
+        const getHeader = (name) => headers.find(h => h.name === name)?.value || '';
+
+        return {
+          id: msg.id,
+          threadId: msg.threadId,
+          from: getHeader('From'),
+          to: getHeader('To'),
+          subject: getHeader('Subject'),
+          preview: detail.data.snippet || '',
+          date: getHeader('Date'),
+          read: !detail.data.labelIds?.includes('UNREAD'),
+          starred: detail.data.labelIds?.includes('STARRED') || false,
+        };
+      })
+    );
+
+    // Filter by company contacts if specified
+    let filteredEmails = emails;
+    if (company_slug && contactEmails.length > 0) {
+      filteredEmails = emails.filter(email => 
+        contactEmails.some(contact => 
+          email.from.toLowerCase().includes(contact.toLowerCase()) || 
+          email.to.toLowerCase().includes(contact.toLowerCase())
+        )
+      );
+    }
+
+    return filteredEmails;
+  },
+
+  async get_email({ email_id }) {
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REFRESH_TOKEN) {
+      throw new Error('Google API not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN.');
+    }
+    
+    const auth = getGoogleAuth();
+    const gmail = google.gmail({ version: 'v1', auth });
+    
+    const detail = await gmail.users.messages.get({
+      userId: 'me',
+      id: email_id,
+      format: 'full',
+    });
+
+    const headers = detail.data.payload.headers;
+    const getHeader = (name) => headers.find(h => h.name === name)?.value || '';
+
+    // Extract body (handles multipart)
+    const getBody = (payload) => {
+      if (payload.body?.data) {
+        return Buffer.from(payload.body.data, 'base64').toString('utf-8');
+      }
+      if (payload.parts) {
+        // Prefer text/plain
+        for (const part of payload.parts) {
+          if (part.mimeType === 'text/plain' && part.body?.data) {
+            return Buffer.from(part.body.data, 'base64').toString('utf-8');
+          }
+        }
+        // Fallback to text/html
+        for (const part of payload.parts) {
+          if (part.mimeType === 'text/html' && part.body?.data) {
+            return Buffer.from(part.body.data, 'base64').toString('utf-8');
+          }
+          if (part.parts) {
+            const nested = getBody(part);
+            if (nested) return nested;
+          }
+        }
+      }
+      return '';
+    };
+
+    return {
+      id: email_id,
+      threadId: detail.data.threadId,
+      from: getHeader('From'),
+      to: getHeader('To'),
+      subject: getHeader('Subject'),
+      body: getBody(detail.data.payload),
+      preview: detail.data.snippet || '',
+      date: getHeader('Date'),
+      read: !detail.data.labelIds?.includes('UNREAD'),
+      starred: detail.data.labelIds?.includes('STARRED') || false,
+    };
+  },
+
+  // ============ CALENDAR HANDLERS ============
+  async list_calendar_events({ start_date, end_date, company_slug, max_results = 50 }) {
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REFRESH_TOKEN) {
+      throw new Error('Google API not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN.');
+    }
+    
+    const auth = getGoogleAuth();
+    const calendar = google.calendar({ version: 'v3', auth });
+    
+    const timeMin = start_date ? new Date(start_date).toISOString() : new Date().toISOString();
+    const defaultEnd = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+    const timeMax = end_date ? new Date(end_date).toISOString() : defaultEnd.toISOString();
+
+    const response = await calendar.events.list({
+      calendarId: 'primary',
+      timeMin,
+      timeMax,
+      maxResults: max_results,
+      singleEvents: true,
+      orderBy: 'startTime',
+    });
+
+    let events = response.data.items.map(event => {
+      // Extract company from [slug] prefix
+      const titleMatch = event.summary?.match(/^\[([a-z0-9-]+)\]\s*/i);
+      const companySlug = titleMatch ? titleMatch[1].toLowerCase() : null;
+      const cleanTitle = titleMatch ? event.summary.replace(titleMatch[0], '') : event.summary;
+      
+      return {
+        id: event.id,
+        title: event.summary || 'Untitled',
+        cleanTitle,
+        description: event.description,
+        start: event.start.dateTime || event.start.date,
+        end: event.end.dateTime || event.end.date,
+        location: event.location,
+        meetLink: event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri,
+        attendees: event.attendees?.map(a => a.email) || [],
+        companySlug
+      };
+    });
+
+    // Filter by company if specified
+    if (company_slug) {
+      events = events.filter(e => e.companySlug === company_slug.toLowerCase());
+    }
+
+    return events;
+  },
+
+  async create_calendar_event({ title, start_time, end_time, description, location, attendees }) {
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REFRESH_TOKEN) {
+      throw new Error('Google API not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN.');
+    }
+    
+    const auth = getGoogleAuth();
+    const calendar = google.calendar({ version: 'v3', auth });
+    
+    const event = {
+      summary: title,
+      description: description,
+      location: location,
+      start: {
+        dateTime: new Date(start_time).toISOString(),
+        timeZone: 'America/New_York'
+      },
+      end: {
+        dateTime: new Date(end_time).toISOString(),
+        timeZone: 'America/New_York'
+      }
+    };
+    
+    if (attendees && attendees.length > 0) {
+      event.attendees = attendees.map(email => ({ email }));
+    }
+    
+    const response = await calendar.events.insert({
+      calendarId: 'primary',
+      resource: event,
+      sendUpdates: attendees ? 'all' : 'none'
+    });
+    
+    return {
+      success: true,
+      event: {
+        id: response.data.id,
+        title: response.data.summary,
+        start: response.data.start.dateTime,
+        end: response.data.end.dateTime,
+        link: response.data.htmlLink
+      }
+    };
   }
 };
 
