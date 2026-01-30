@@ -6,7 +6,7 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));  // Increased for file uploads
 
 // Supabase client
 const supabase = createClient(
@@ -34,7 +34,7 @@ const SYSTEM_PROMPT = `You are the AI-in-a-Box Dev Dashboard assistant. You help
 You have access to tools that let you:
 - View and update company status, milestones, and requirements
 - Track dev tasks and assignments  
-- Manage documents and files
+- Manage documents and files (upload, list, read content, delete)
 - Send emails and project updates
 - View activity logs
 
@@ -44,6 +44,12 @@ Current portfolio companies:
 - QWILT (CDN, edge computing) - Slack-based support
 - PacketFabric (network connectivity) - ServiceNow
 - Welink (ISP, similar to Element 8) - Discovery phase
+
+DOCUMENT HANDLING:
+- Use list_all_documents to see what docs exist
+- Use get_document_content to read text files (md, txt, json, csv, html, etc)
+- For PDFs and images, provide the URL for the user to view
+- When asked to summarize a document, first get its content, then summarize
 
 Be concise and direct. Use tools to get real data - don't guess.
 When you complete an action, confirm what you did.
@@ -180,7 +186,7 @@ const tools = [
   },
   {
     name: "add_document",
-    description: "Register a document for a company",
+    description: "Register a document for a company (metadata only, no file upload)",
     inputSchema: {
       type: "object",
       properties: {
@@ -304,6 +310,56 @@ const tools = [
       },
       required: ["task_id"]
     }
+  },
+  // ============ DOCUMENT STORAGE TOOLS ============
+  {
+    name: "upload_document",
+    description: "Upload a document to storage. Accepts base64 encoded file data.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        slug: { type: "string", description: "Company slug (dtiq, element8, etc) or 'platform' for shared docs" },
+        filename: { type: "string", description: "Filename with extension (e.g., 'architecture.png')" },
+        content_base64: { type: "string", description: "Base64 encoded file content" },
+        content_type: { type: "string", description: "MIME type (e.g., 'image/png', 'application/pdf', 'text/markdown')" },
+        category: { type: "string", enum: ["architecture", "notes", "analysis", "screenshot", "sop", "training", "general"], description: "Document category" },
+        description: { type: "string", description: "Optional description" }
+      },
+      required: ["slug", "filename", "content_base64", "content_type"]
+    }
+  },
+  {
+    name: "get_document_content",
+    description: "Get the content of a text-based document (md, txt, json, csv, html). For summarizing or reading docs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        document_id: { type: "string", description: "Document UUID" }
+      },
+      required: ["document_id"]
+    }
+  },
+  {
+    name: "list_all_documents",
+    description: "List all documents across all companies or for a specific company",
+    inputSchema: {
+      type: "object",
+      properties: {
+        slug: { type: "string", description: "Optional: filter by company slug, or 'platform' for shared docs" },
+        category: { type: "string", description: "Optional: filter by category" }
+      }
+    }
+  },
+  {
+    name: "delete_document",
+    description: "Delete a document from storage and database",
+    inputSchema: {
+      type: "object",
+      properties: {
+        document_id: { type: "string", description: "Document UUID" }
+      },
+      required: ["document_id"]
+    }
   }
 ];
 
@@ -332,7 +388,6 @@ const handlers = {
       .single();
     if (error) throw error;
     
-    // Sort milestones and activity
     if (data.milestones) data.milestones.sort((a, b) => a.order_index - b.order_index);
     if (data.activity) data.activity.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     
@@ -385,7 +440,6 @@ const handlers = {
       .from('companies').select('id').eq('slug', slug).single();
     if (!company) throw new Error(`Company not found: ${slug}`);
     
-    // Get max order_index
     const { data: existing } = await supabase
       .from('milestones')
       .select('order_index')
@@ -473,7 +527,7 @@ const handlers = {
       .from('documents')
       .select('*')
       .eq('company_id', company.id)
-      .order('uploaded_at', { ascending: false });
+      .order('created_at', { ascending: false });
     if (error) throw error;
     return data;
   },
@@ -559,7 +613,6 @@ const handlers = {
       throw new Error('Email not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD environment variables.');
     }
     
-    // Get all company data
     const { data: companies, error } = await supabase
       .from('companies')
       .select(`
@@ -569,7 +622,6 @@ const handlers = {
       `);
     if (error) throw error;
     
-    // Build email HTML
     const date = new Date().toLocaleDateString('en-US', { 
       weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' 
     });
@@ -622,7 +674,6 @@ const handlers = {
     
     html += '</table>';
     
-    // Add details if requested
     if (include_details) {
       for (const c of companies) {
         html += `
@@ -631,7 +682,6 @@ const handlers = {
             <p style="color: #666; font-size: 14px;">${c.description || ''}</p>
         `;
         
-        // Milestones
         const sortedMilestones = (c.milestones || [])
           .filter(m => !m.title.startsWith('[FUTURE]'))
           .sort((a, b) => a.order_index - b.order_index);
@@ -646,7 +696,6 @@ const handlers = {
           html += '</ul>';
         }
         
-        // Requirements
         const needed = (c.requirements || []).filter(r => r.status === 'needed');
         if (needed.length > 0) {
           html += '<p style="margin-bottom: 5px;"><strong>Still Need:</strong></p><ul style="margin-top: 5px;">';
@@ -668,7 +717,6 @@ const handlers = {
       </div>
     `;
     
-    // Send email
     const emailSubject = subject || `AI-in-a-Box Portfolio Update — ${date}`;
     
     await transporter.sendMail({
@@ -678,7 +726,6 @@ const handlers = {
       html
     });
     
-    // Log activity
     await supabase.from('activity').insert({
       company_id: null,
       type: 'email',
@@ -748,6 +795,176 @@ const handlers = {
       .eq('id', task_id);
     if (error) throw error;
     return { success: true, deleted: task_id };
+  },
+
+  // ============ DOCUMENT STORAGE HANDLERS ============
+  async upload_document({ slug, filename, content_base64, content_type, category, description }) {
+    // Get company ID if not platform/dev
+    let company_id = null;
+    if (slug !== 'platform' && slug !== 'dev') {
+      const { data: company } = await supabase
+        .from('companies')
+        .select('id')
+        .eq('slug', slug)
+        .single();
+      if (!company) throw new Error(`Company not found: ${slug}`);
+      company_id = company.id;
+    }
+
+    // Decode base64
+    const buffer = Buffer.from(content_base64, 'base64');
+    
+    // Build path: {slug}/{filename}
+    const bucket_path = `${slug}/${filename}`;
+    
+    // Upload to Supabase Storage
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from('documents')
+      .upload(bucket_path, buffer, {
+        contentType: content_type,
+        upsert: true
+      });
+    
+    if (uploadError) throw uploadError;
+    
+    // Get public URL
+    const { data: urlData } = supabase.storage
+      .from('documents')
+      .getPublicUrl(bucket_path);
+    
+    // Determine file type from extension
+    const ext = filename.split('.').pop().toLowerCase();
+    
+    // Insert into documents table
+    const { data: doc, error: dbError } = await supabase
+      .from('documents')
+      .insert({
+        company_id,
+        name: filename,
+        type: category || 'general',
+        url: urlData.publicUrl,
+        file_url: urlData.publicUrl,
+        bucket_path,
+        file_type: ext,
+        category: category || 'general',
+        notes: description
+      })
+      .select()
+      .single();
+    
+    if (dbError) throw dbError;
+    
+    return { 
+      success: true, 
+      document: doc,
+      url: urlData.publicUrl
+    };
+  },
+
+  async get_document_content({ document_id }) {
+    // Get document metadata
+    const { data: doc, error } = await supabase
+      .from('documents')
+      .select('*, companies(name, slug)')
+      .eq('id', document_id)
+      .single();
+    
+    if (error) throw error;
+    if (!doc) throw new Error('Document not found');
+    
+    // Check if it's a text-readable format
+    const textFormats = ['md', 'txt', 'json', 'csv', 'html', 'xml', 'js', 'ts', 'py', 'sql'];
+    const ext = doc.file_type?.toLowerCase();
+    
+    if (!textFormats.includes(ext)) {
+      return {
+        document: doc,
+        content: null,
+        message: `Cannot read content of .${ext} files directly. Use the URL to view: ${doc.file_url}`
+      };
+    }
+    
+    // Fetch the file content
+    try {
+      const response = await fetch(doc.file_url);
+      if (!response.ok) throw new Error(`Failed to fetch: ${response.status}`);
+      let content = await response.text();
+      
+      // Truncate if too long (keep first 50k chars)
+      const truncated = content.length > 50000;
+      if (truncated) {
+        content = content.substring(0, 50000) + '\n\n... [truncated]';
+      }
+      
+      return {
+        document: doc,
+        content,
+        truncated
+      };
+    } catch (fetchError) {
+      return {
+        document: doc,
+        content: null,
+        error: fetchError.message
+      };
+    }
+  },
+
+  async list_all_documents({ slug, category }) {
+    let query = supabase
+      .from('documents')
+      .select('*, companies(name, slug)')
+      .order('created_at', { ascending: false });
+    
+    if (slug) {
+      if (slug === 'platform' || slug === 'dev') {
+        query = query.is('company_id', null);
+      } else {
+        const { data: company } = await supabase
+          .from('companies')
+          .select('id')
+          .eq('slug', slug)
+          .single();
+        if (company) {
+          query = query.eq('company_id', company.id);
+        }
+      }
+    }
+    
+    if (category) {
+      query = query.eq('category', category);
+    }
+    
+    const { data, error } = await query;
+    if (error) throw error;
+    
+    return data;
+  },
+
+  async delete_document({ document_id }) {
+    // Get document to find bucket_path
+    const { data: doc } = await supabase
+      .from('documents')
+      .select('bucket_path')
+      .eq('id', document_id)
+      .single();
+    
+    if (doc?.bucket_path) {
+      // Delete from storage
+      await supabase.storage
+        .from('documents')
+        .remove([doc.bucket_path]);
+    }
+    
+    // Delete from database
+    const { error } = await supabase
+      .from('documents')
+      .delete()
+      .eq('id', document_id);
+    
+    if (error) throw error;
+    
+    return { success: true, deleted: document_id };
   }
 };
 
@@ -760,20 +977,17 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'Message required' });
     }
 
-    // Build messages
     const messages = [
       ...conversation_history,
       { role: 'user', content: message }
     ];
 
-    // Convert tools to Claude format
     const claudeTools = tools.map(t => ({
       name: t.name,
       description: t.description,
       input_schema: t.inputSchema
     }));
 
-    // Call Claude
     let response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 4096,
@@ -821,7 +1035,6 @@ app.post('/chat', async (req, res) => {
       });
     }
 
-    // Extract text response
     const textContent = response.content.find(b => b.type === 'text');
     const finalResponse = textContent?.text || 'No response';
 
@@ -836,18 +1049,32 @@ app.post('/chat', async (req, res) => {
   }
 });
 
+// ============ FILE UPLOAD ENDPOINT (for dashboard) ============
+app.post('/upload', async (req, res) => {
+  try {
+    const { slug, filename, content_base64, content_type, category, description } = req.body;
+    
+    if (!slug || !filename || !content_base64 || !content_type) {
+      return res.status(400).json({ error: 'Missing required fields: slug, filename, content_base64, content_type' });
+    }
+    
+    const result = await handlers.upload_document({ slug, filename, content_base64, content_type, category, description });
+    res.json(result);
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============ MCP ENDPOINTS ============
 
-// SSE endpoint for MCP
 app.get('/mcp', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   
-  // Send initial connection message
   res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
   
-  // Keep connection alive
   const keepAlive = setInterval(() => {
     res.write(`data: ${JSON.stringify({ type: 'ping' })}\n\n`);
   }, 30000);
@@ -857,12 +1084,10 @@ app.get('/mcp', (req, res) => {
   });
 });
 
-// List available tools
 app.get('/tools', (req, res) => {
   res.json({ tools });
 });
 
-// Execute a tool
 app.post('/tools/:name', async (req, res) => {
   const { name } = req.params;
   const params = req.body;
@@ -880,7 +1105,6 @@ app.post('/tools/:name', async (req, res) => {
   }
 });
 
-// MCP protocol endpoint (for Claude.ai)
 app.post('/mcp', async (req, res) => {
   const { method, params } = req.body;
   
@@ -917,12 +1141,10 @@ app.post('/mcp', async (req, res) => {
   }
 });
 
-// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Root
 app.get('/', (req, res) => {
   res.json({
     name: 'MCP Project Tracker',
@@ -932,12 +1154,12 @@ app.get('/', (req, res) => {
       '/tools': 'List available tools',
       '/tools/:name': 'Execute a tool (POST)',
       '/mcp': 'MCP protocol endpoint',
-      '/chat': 'Natural language chat endpoint (POST)'
+      '/chat': 'Natural language chat endpoint (POST)',
+      '/upload': 'File upload endpoint (POST)'
     }
   });
 });
 
-// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`MCP Project Tracker running on port ${PORT}`);
