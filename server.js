@@ -41,6 +41,51 @@ function getGoogleAuth() {
   return oauth2Client;
 }
 
+// ============ CRM INSTANCE CONFIG ============
+const CRM_COMPANIES = (process.env.CRM_INSTANCES || 'dtiq,packetfabric,element8,qwilt,welink,dev').split(',');
+
+function getCRMConfig(company) {
+  const key = company.toUpperCase().replace(/-/g, '_');
+  return {
+    url: process.env[`CRM_URL_${key}`],
+    apiKey: process.env[`CRM_KEY_${key}`],
+    tenantId: company
+  };
+}
+
+async function callCRM(company, method, path, body) {
+  const config = getCRMConfig(company);
+  if (!config.url) throw new Error(`No CRM URL configured for ${company}`);
+  if (!config.apiKey) throw new Error(`No CRM API key configured for ${company}`);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const resp = await fetch(`${config.url}${path}`, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Tenant-ID': config.tenantId,
+        'X-API-Key': config.apiKey,
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.message || `CRM ${company} returned HTTP ${resp.status}`);
+    }
+    return resp.json();
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') throw new Error(`CRM ${company} request timed out`);
+    throw err;
+  }
+}
+
 // ============ SYSTEM PROMPT FOR CHAT ============
 const SYSTEM_PROMPT = `You are the AI-in-a-Box Dev Dashboard assistant. You help the Digital Alpha team manage AI implementations across their portfolio companies.
 
@@ -78,6 +123,18 @@ DEPLOYMENT HANDLING:
 - Use list_deployments to see all deployments
 - Use get_deployment to see a deployment with all its components
 - Use check_deployment_health to ping URLs and update status
+
+CRM INSTANCE MANAGEMENT:
+- Use list_crm_instances to see all company CRM instances and their config status
+- Use get_crm_instance_status to get detailed stats for a specific instance (user count, health)
+- Use check_crm_instance_health to health check all instances at once
+- Use list_crm_users to search/browse users on any instance
+- Use create_crm_user to create a new user account on any instance
+- Use update_crm_user_role to change a user's role (admin, manager, agent, customer)
+- Use delete_crm_user to remove a user from an instance
+- Use reset_crm_user_password to reset a user's password
+- Available companies: dtiq, packetfabric, element8, qwilt, welink, dev
+- For bulk operations across all instances, call the tool once per company
 
 Be concise and direct. Use tools to get real data - don't guess.
 When you complete an action, confirm what you did.
@@ -536,6 +593,96 @@ const tools = [
         attendees: { type: "array", items: { type: "string" }, description: "List of attendee email addresses" }
       },
       required: ["title", "start_time", "end_time"]
+    }
+  },
+  // ============ CRM INSTANCE MANAGEMENT TOOLS ============
+  {
+    name: "list_crm_instances",
+    description: "List all CRM company instances with their configuration status",
+    inputSchema: { type: "object", properties: {}, required: [] }
+  },
+  {
+    name: "get_crm_instance_status",
+    description: "Get detailed status for a company's CRM instance including user count, health, and stats",
+    inputSchema: {
+      type: "object",
+      properties: {
+        company: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Company slug" }
+      },
+      required: ["company"]
+    }
+  },
+  {
+    name: "check_crm_instance_health",
+    description: "Health check all CRM instances at once",
+    inputSchema: { type: "object", properties: {}, required: [] }
+  },
+  {
+    name: "list_crm_users",
+    description: "List users on a company's CRM instance with optional search, role filter, and pagination",
+    inputSchema: {
+      type: "object",
+      properties: {
+        company: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Company slug" },
+        search: { type: "string", description: "Search by email or name" },
+        role: { type: "string", enum: ["admin", "manager", "agent", "customer"], description: "Filter by role" },
+        page: { type: "number", description: "Page number (default 1)" },
+        limit: { type: "number", description: "Results per page (default 25)" }
+      },
+      required: ["company"]
+    }
+  },
+  {
+    name: "create_crm_user",
+    description: "Create a new user account on a company's CRM instance (creates in Firebase Auth + database)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        company: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Company slug" },
+        email: { type: "string", description: "User email address" },
+        password: { type: "string", description: "Password (min 8 characters)" },
+        displayName: { type: "string", description: "User's display name" },
+        role: { type: "string", enum: ["admin", "manager", "agent", "customer"], description: "User role (default: agent)" }
+      },
+      required: ["company", "email", "password", "displayName"]
+    }
+  },
+  {
+    name: "update_crm_user_role",
+    description: "Update a user's role on a company's CRM instance",
+    inputSchema: {
+      type: "object",
+      properties: {
+        company: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Company slug" },
+        user_id: { type: "string", description: "User UID" },
+        role: { type: "string", enum: ["admin", "manager", "agent", "customer"], description: "New role" }
+      },
+      required: ["company", "user_id", "role"]
+    }
+  },
+  {
+    name: "delete_crm_user",
+    description: "Delete a user from a company's CRM instance",
+    inputSchema: {
+      type: "object",
+      properties: {
+        company: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Company slug" },
+        user_id: { type: "string", description: "User UID to delete" }
+      },
+      required: ["company", "user_id"]
+    }
+  },
+  {
+    name: "reset_crm_user_password",
+    description: "Reset a user's password on a company's CRM instance",
+    inputSchema: {
+      type: "object",
+      properties: {
+        company: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Company slug" },
+        user_id: { type: "string", description: "User UID" },
+        new_password: { type: "string", description: "New password (min 8 characters)" }
+      },
+      required: ["company", "user_id", "new_password"]
     }
   }
 ];
@@ -1622,6 +1769,129 @@ const handlers = {
         link: response.data.htmlLink
       }
     };
+  },
+
+  // ============ CRM INSTANCE MANAGEMENT HANDLERS ============
+  async list_crm_instances() {
+    const instances = CRM_COMPANIES.map(company => {
+      const config = getCRMConfig(company);
+      return {
+        company,
+        configured: !!(config.url && config.apiKey),
+        url: config.url || 'not configured',
+      };
+    });
+    return instances;
+  },
+
+  async get_crm_instance_status({ company }) {
+    const config = getCRMConfig(company);
+    if (!config.url) return { company, status: 'not_configured', error: 'No CRM URL configured' };
+
+    try {
+      // Health check
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const startTime = Date.now();
+      const healthResp = await fetch(`${config.url}/health`, { signal: controller.signal });
+      clearTimeout(timeout);
+      const latency = Date.now() - startTime;
+      const healthy = healthResp.ok;
+
+      // Get user count + stats
+      let users = null;
+      try {
+        const result = await callCRM(company, 'GET', '/admin/users?limit=1');
+        users = result.meta;
+      } catch (e) {
+        users = { error: e.message };
+      }
+
+      // Get admin status
+      let adminStatus = null;
+      try {
+        const result = await callCRM(company, 'GET', '/admin/status');
+        adminStatus = result.data;
+      } catch (e) {
+        adminStatus = { error: e.message };
+      }
+
+      return {
+        company,
+        status: healthy ? (latency > 5000 ? 'degraded' : 'healthy') : 'unhealthy',
+        latency_ms: latency,
+        users,
+        adminStatus,
+      };
+    } catch (err) {
+      return { company, status: 'down', error: err.message };
+    }
+  },
+
+  async check_crm_instance_health() {
+    const results = {};
+    await Promise.all(CRM_COMPANIES.map(async (company) => {
+      const config = getCRMConfig(company);
+      if (!config.url) {
+        results[company] = { status: 'not_configured' };
+        return;
+      }
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const startTime = Date.now();
+        const resp = await fetch(`${config.url}/health`, { signal: controller.signal });
+        clearTimeout(timeout);
+        const latency = Date.now() - startTime;
+        results[company] = {
+          status: resp.ok ? (latency > 5000 ? 'degraded' : 'healthy') : 'unhealthy',
+          latency_ms: latency,
+        };
+      } catch (err) {
+        results[company] = { status: 'down', error: err.message };
+      }
+    }));
+    return results;
+  },
+
+  async list_crm_users({ company, search, role, page, limit }) {
+    const params = new URLSearchParams();
+    if (search) params.set('search', search);
+    if (role) params.set('role', role);
+    if (page) params.set('page', String(page));
+    if (limit) params.set('limit', String(limit));
+
+    const qs = params.toString();
+    const result = await callCRM(company, 'GET', `/admin/users${qs ? '?' + qs : ''}`);
+    return { company, users: result.data, meta: result.meta };
+  },
+
+  async create_crm_user({ company, email, password, displayName, role }) {
+    const result = await callCRM(company, 'POST', '/admin/users', {
+      email,
+      password,
+      displayName,
+      role: role || 'agent',
+    });
+    return { company, user: result.data, success: true };
+  },
+
+  async update_crm_user_role({ company, user_id, role }) {
+    const result = await callCRM(company, 'PATCH', `/admin/users/${user_id}/role`, { role });
+    return { company, user: result.data, success: true };
+  },
+
+  async delete_crm_user({ company, user_id }) {
+    await callCRM(company, 'DELETE', `/admin/users/${user_id}`);
+    return { company, deleted: user_id, success: true };
+  },
+
+  async reset_crm_user_password({ company, user_id, new_password }) {
+    await callCRM(company, 'POST', '/admin/change-password', {
+      userId: user_id,
+      newPassword: new_password,
+    });
+    return { company, user_id, success: true, message: 'Password reset successfully' };
   }
 };
 
