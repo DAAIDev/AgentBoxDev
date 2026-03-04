@@ -706,6 +706,24 @@ const tools = [
       },
       required: ["company", "user_id", "new_password"]
     }
+  },
+  {
+    name: "submit_admin_request",
+    description: "Submit an internal admin request (Google Workspace issue or website edit request)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        type: { type: "string", enum: ["workspace", "website"], description: "Request type" },
+        category: { type: "string", description: "Category (e.g. google-drive, gmail, content-update, bug-fix)" },
+        subject: { type: "string", description: "Brief subject (for workspace requests)" },
+        description: { type: "string", description: "Detailed description of the request" },
+        priority: { type: "string", enum: ["low", "medium", "high"], description: "Priority level" },
+        pageUrl: { type: "string", description: "Page URL or section (for website requests)" },
+        referenceUrl: { type: "string", description: "Optional reference link" },
+        submitted_by: { type: "string", description: "Email or name of submitter" }
+      },
+      required: ["type", "category", "description"]
+    }
   }
 ];
 
@@ -1492,6 +1510,16 @@ const handlers = {
   async reset_crm_user_password({ company, user_id, new_password }) {
     await callCRM(company, 'POST', '/admin/change-password', { userId: user_id, newPassword: new_password });
     return { company, user_id, success: true, message: 'Password reset successfully' };
+  },
+
+  async submit_admin_request({ type, category, subject, description, priority, pageUrl, referenceUrl, submitted_by }) {
+    const row = await queryOne(
+      `INSERT INTO admin_requests (type, category, subject, description, priority, page_url, reference_url, submitted_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, type, category, subject, description, priority, status, created_at`,
+      [type, category, subject || null, description, priority || 'medium', pageUrl || null, referenceUrl || null, submitted_by || null]
+    );
+    return { id: row.id, ...row };
   }
 };
 
