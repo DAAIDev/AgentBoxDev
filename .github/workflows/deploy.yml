@@ -1,0 +1,90 @@
+name: Deploy MCP Server to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: agentbox-485618
+  REGION: us-central1
+  REGISTRY: us-central1-docker.pkg.dev/agentbox-485618/agentbox
+  IMAGE_NAME: mcp-server
+  SERVICE_NAME: mcp-server
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Build and push Docker image
+        run: |
+          docker build \
+            -t $REGISTRY/$IMAGE_NAME:${{ github.sha }} \
+            -t $REGISTRY/$IMAGE_NAME:latest \
+            .
+          docker push $REGISTRY/$IMAGE_NAME:${{ github.sha }}
+          docker push $REGISTRY/$IMAGE_NAME:latest
+
+      - name: Get CRM Backend URLs
+        id: crm_urls
+        run: |
+          for company in dtiq packetfabric element8 qwilt welink dev; do
+            url=$(gcloud run services describe crm-backend-${company} \
+              --region $REGION --format 'value(status.url)' 2>/dev/null || echo "")
+            KEY=$(echo $company | tr '[:lower:]' '[:upper:]' | tr '-' '_')
+            echo "CRM_URL_${KEY}=${url}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy $SERVICE_NAME \
+            --image $REGISTRY/$IMAGE_NAME:${{ github.sha }} \
+            --region $REGION \
+            --platform managed \
+            --memory 512Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 3 \
+            --port 8080 \
+            --allow-unauthenticated \
+            --set-secrets "\
+              SUPABASE_URL=mcp-supabase-url:latest,\
+              SUPABASE_KEY=mcp-supabase-key:latest,\
+              ANTHROPIC_API_KEY=mcp-anthropic-api-key:latest,\
+              GMAIL_USER=mcp-gmail-user:latest,\
+              GMAIL_APP_PASSWORD=mcp-gmail-app-password:latest,\
+              GOOGLE_CLIENT_ID=mcp-google-client-id:latest,\
+              GOOGLE_CLIENT_SECRET=mcp-google-client-secret:latest,\
+              GOOGLE_REFRESH_TOKEN=mcp-google-refresh-token:latest,\
+              CRM_KEY_DTIQ=dtiq-api-key:latest,\
+              CRM_KEY_PACKETFABRIC=packetfabric-api-key:latest,\
+              CRM_KEY_ELEMENT8=element8-api-key:latest,\
+              CRM_KEY_QWILT=qwilt-api-key:latest,\
+              CRM_KEY_WELINK=welink-api-key:latest,\
+              CRM_KEY_DEV=dev-api-key:latest" \
+            --update-env-vars "^;^\
+              NODE_ENV=production;\
+              CRM_INSTANCES=dtiq,packetfabric,element8,qwilt,welink,dev;\
+              CRM_URL_DTIQ=${{ steps.crm_urls.outputs.CRM_URL_DTIQ }};\
+              CRM_URL_PACKETFABRIC=${{ steps.crm_urls.outputs.CRM_URL_PACKETFABRIC }};\
+              CRM_URL_ELEMENT8=${{ steps.crm_urls.outputs.CRM_URL_ELEMENT8 }};\
+              CRM_URL_QWILT=${{ steps.crm_urls.outputs.CRM_URL_QWILT }};\
+              CRM_URL_WELINK=${{ steps.crm_urls.outputs.CRM_URL_WELINK }};\
+              CRM_URL_DEV=${{ steps.crm_urls.outputs.CRM_URL_DEV }}"
+
+      - name: Show service URL
+        run: |
+          URL=$(gcloud run services describe $SERVICE_NAME --region $REGION --format 'value(status.url)')
+          echo "🚀 MCP Server deployed to: $URL"
