@@ -1607,6 +1607,97 @@ app.post('/api/instances/:company/users/:uid/reset-password', async (req, res) =
   }
 });
 
+// ============ FEEDBACK AGGREGATION REST API ============
+
+// Aggregate feedback from all (or filtered) companies
+app.get('/api/feedback/all', async (req, res) => {
+  const { status, type, company: filterCompany } = req.query;
+  const companies = filterCompany
+    ? [filterCompany]
+    : CRM_COMPANIES.filter(c => getCRMConfig(c).url);
+
+  const results = [];
+  const errors = {};
+
+  await Promise.all(companies.map(async (company) => {
+    try {
+      const params = new URLSearchParams();
+      if (status) params.set('status', status);
+      if (type) params.set('type', type);
+      const qs = params.toString();
+      const data = await callCRM(company, 'GET', `/tester-feedback${qs ? '?' + qs : ''}`, null);
+      const items = Array.isArray(data) ? data : [];
+      results.push(...items.map(item => ({ ...item, _company: company })));
+    } catch (err) {
+      errors[company] = err.message;
+    }
+  }));
+
+  // Sort: CRITICAL > HIGH > MEDIUM > LOW, then newest first
+  const priorityOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+  results.sort((a, b) => {
+    const pDiff = (priorityOrder[a.priority] ?? 9) - (priorityOrder[b.priority] ?? 9);
+    if (pDiff !== 0) return pDiff;
+    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  });
+
+  res.json({ feedback: results, errors, totalCompanies: companies.length });
+});
+
+// Aggregate feedback stats from all companies
+app.get('/api/feedback/stats', async (req, res) => {
+  const companies = CRM_COMPANIES.filter(c => getCRMConfig(c).url);
+  const perCompany = {};
+  const aggregated = { total: 0, byStatus: {}, byType: {}, recentCount: 0, byCompany: {} };
+
+  await Promise.all(companies.map(async (company) => {
+    try {
+      const stats = await callCRM(company, 'GET', '/tester-feedback/stats', null);
+      perCompany[company] = stats;
+      aggregated.total += stats.total || 0;
+      aggregated.recentCount += stats.recentCount || 0;
+      aggregated.byCompany[company] = stats.total || 0;
+      for (const [s, count] of Object.entries(stats.byStatus || {})) {
+        aggregated.byStatus[s] = (aggregated.byStatus[s] || 0) + count;
+      }
+      for (const [t, count] of Object.entries(stats.byType || {})) {
+        aggregated.byType[t] = (aggregated.byType[t] || 0) + count;
+      }
+    } catch (err) {
+      perCompany[company] = { error: err.message };
+    }
+  }));
+
+  res.json({ aggregated, perCompany });
+});
+
+// Get single feedback item
+app.get('/api/feedback/:company/:id', async (req, res) => {
+  try {
+    const { company, id } = req.params;
+    const result = await callCRM(company, 'GET', `/tester-feedback/${id}`, null);
+    res.json({ ...result, _company: company });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update feedback status/priority/resolution
+app.patch('/api/feedback/:company/:id', async (req, res) => {
+  try {
+    const { company, id } = req.params;
+    const { status, priority, resolutionNotes } = req.body;
+    const body = {};
+    if (status) body.status = status;
+    if (priority) body.priority = priority;
+    if (resolutionNotes !== undefined) body.resolutionNotes = resolutionNotes;
+    const result = await callCRM(company, 'PATCH', `/tester-feedback/${id}`, body);
+    res.json({ ...result, _company: company, success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============ CHAT ENDPOINT - THE BRAIN ============
 app.post('/chat', async (req, res) => {
   try {
@@ -1735,7 +1826,10 @@ app.get('/', (req, res) => {
       '/api/instances/:company/users': 'List/Create CRM users (GET/POST)',
       '/api/instances/:company/users/:uid/role': 'Update user role (PATCH)',
       '/api/instances/:company/users/:uid': 'Delete user (DELETE)',
-      '/api/instances/:company/users/:uid/reset-password': 'Reset password (POST)'
+      '/api/instances/:company/users/:uid/reset-password': 'Reset password (POST)',
+      '/api/feedback/all': 'Aggregate feedback from all CRM instances (GET)',
+      '/api/feedback/stats': 'Aggregate feedback stats (GET)',
+      '/api/feedback/:company/:id': 'Get/Update feedback item (GET/PATCH)'
     }
   });
 });
