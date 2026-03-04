@@ -67,7 +67,7 @@ async function callCRM(company, method, path, body) {
   const timeout = setTimeout(() => controller.abort(), 15000);
 
   try {
-    const resp = await fetch(`${config.url}${path}`, {
+    const resp = await fetch(`${config.url}/api${path}`, {
       method,
       headers: {
         'Content-Type': 'application/json',
@@ -1427,7 +1427,7 @@ const handlers = {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
       const startTime = Date.now();
-      const healthResp = await fetch(`${config.url}/health`, { signal: controller.signal });
+      const healthResp = await fetch(`${config.url}/api/health`, { signal: controller.signal });
       clearTimeout(timeout);
       const latency = Date.now() - startTime;
       const healthy = healthResp.ok;
@@ -1437,6 +1437,7 @@ const handlers = {
 
       let adminStatus = null;
       try { const result = await callCRM(company, 'GET', '/admin/status'); adminStatus = result.data; } catch (e) { adminStatus = { error: e.message }; }
+
 
       return { company, status: healthy ? (latency > 5000 ? 'degraded' : 'healthy') : 'unhealthy', latency_ms: latency, users, adminStatus };
     } catch (err) {
@@ -1453,7 +1454,7 @@ const handlers = {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
         const startTime = Date.now();
-        const resp = await fetch(`${config.url}/health`, { signal: controller.signal });
+        const resp = await fetch(`${config.url}/api/health`, { signal: controller.signal });
         clearTimeout(timeout);
         const latency = Date.now() - startTime;
         results[company] = { status: resp.ok ? (latency > 5000 ? 'degraded' : 'healthy') : 'unhealthy', latency_ms: latency };
