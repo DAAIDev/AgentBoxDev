@@ -1495,6 +1495,118 @@ const handlers = {
   }
 };
 
+// ============ CRM INSTANCE REST API ============
+
+// List all configured CRM instances
+app.get('/api/instances', (req, res) => {
+  const instances = CRM_COMPANIES.map(company => {
+    const config = getCRMConfig(company);
+    return { company, configured: !!config.url, url: config.url || null };
+  });
+  res.json(instances);
+});
+
+// Health check all CRM instances
+app.get('/api/instances/health', async (req, res) => {
+  const results = {};
+  await Promise.all(CRM_COMPANIES.map(async (company) => {
+    const config = getCRMConfig(company);
+    if (!config.url) {
+      results[company] = { status: 'not_configured' };
+      return;
+    }
+    const start = Date.now();
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const resp = await fetch(`${config.url}/api/health`, {
+        headers: { 'X-Tenant-ID': config.tenantId, 'X-API-Key': config.apiKey },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      const latency = Date.now() - start;
+      if (resp.ok) {
+        results[company] = { status: latency > 5000 ? 'degraded' : 'healthy', latency_ms: latency };
+      } else {
+        results[company] = { status: 'unhealthy', latency_ms: latency, http_status: resp.status };
+      }
+    } catch (err) {
+      results[company] = { status: 'down', error: err.message, latency_ms: Date.now() - start };
+    }
+  }));
+  res.json(results);
+});
+
+// List users for a company
+app.get('/api/instances/:company/users', async (req, res) => {
+  try {
+    const { company } = req.params;
+    const { search, role, page, limit } = req.query;
+    const params = new URLSearchParams();
+    if (search) params.set('search', search);
+    if (role) params.set('role', role);
+    if (page) params.set('page', page);
+    if (limit) params.set('limit', limit);
+    const qs = params.toString();
+    const result = await callCRM(company, 'GET', `/admin/users${qs ? '?' + qs : ''}`, null);
+    res.json({ company, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Create user on a company's CRM
+app.post('/api/instances/:company/users', async (req, res) => {
+  try {
+    const { company } = req.params;
+    const { email, password, displayName, role } = req.body;
+    if (!email || !password || !displayName) {
+      return res.status(400).json({ error: 'email, password, and displayName are required' });
+    }
+    const result = await callCRM(company, 'POST', '/admin/users', { email, password, displayName, role: role || 'agent' });
+    res.json({ company, ...result, success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update user role
+app.patch('/api/instances/:company/users/:uid/role', async (req, res) => {
+  try {
+    const { company, uid } = req.params;
+    const { role } = req.body;
+    if (!role) return res.status(400).json({ error: 'role is required' });
+    const result = await callCRM(company, 'PATCH', `/admin/users/${uid}/role`, { role });
+    res.json({ company, ...result, success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete user
+app.delete('/api/instances/:company/users/:uid', async (req, res) => {
+  try {
+    const { company, uid } = req.params;
+    const result = await callCRM(company, 'DELETE', `/admin/users/${uid}`, null);
+    res.json({ company, deleted: uid, ...result, success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reset user password
+app.post('/api/instances/:company/users/:uid/reset-password', async (req, res) => {
+  try {
+    const { company, uid } = req.params;
+    const { newPassword } = req.body;
+    if (!newPassword) return res.status(400).json({ error: 'newPassword is required' });
+    const result = await callCRM(company, 'POST', '/admin/change-password', { userId: uid, newPassword });
+    res.json({ company, user_id: uid, ...result, success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============ CHAT ENDPOINT - THE BRAIN ============
 app.post('/chat', async (req, res) => {
   try {
@@ -1617,7 +1729,13 @@ app.get('/', (req, res) => {
       '/tools/:name': 'Execute a tool (POST)',
       '/mcp': 'MCP protocol endpoint',
       '/chat': 'Natural language chat endpoint (POST)',
-      '/upload': 'File upload endpoint (POST)'
+      '/upload': 'File upload endpoint (POST)',
+      '/api/instances': 'List CRM instances (GET)',
+      '/api/instances/health': 'Health check all CRM instances (GET)',
+      '/api/instances/:company/users': 'List/Create CRM users (GET/POST)',
+      '/api/instances/:company/users/:uid/role': 'Update user role (PATCH)',
+      '/api/instances/:company/users/:uid': 'Delete user (DELETE)',
+      '/api/instances/:company/users/:uid/reset-password': 'Reset password (POST)'
     }
   });
 });
