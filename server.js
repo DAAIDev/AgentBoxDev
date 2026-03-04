@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
-import { createClient } from '@supabase/supabase-js';
+import pg from 'pg';
+import { Storage } from '@google-cloud/storage';
 import nodemailer from 'nodemailer';
 import Anthropic from '@anthropic-ai/sdk';
 import { google } from 'googleapis';
@@ -9,11 +10,15 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Supabase client
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
-);
+// PostgreSQL connection pool
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 10,
+});
+
+// GCS client for document storage
+const gcs = new Storage();
+const GCS_BUCKET = process.env.GCS_BUCKET || 'mcp-documents-agentbox';
 
 // Anthropic client
 const anthropic = new Anthropic({
@@ -86,12 +91,29 @@ async function callCRM(company, method, path, body) {
   }
 }
 
+// ============ DB HELPER ============
+async function query(text, params) {
+  const { rows } = await pool.query(text, params);
+  return rows;
+}
+
+async function queryOne(text, params) {
+  const { rows } = await pool.query(text, params);
+  return rows[0] || null;
+}
+
+async function getCompanyId(slug) {
+  const row = await queryOne('SELECT id FROM companies WHERE slug = $1', [slug]);
+  if (!row) throw new Error(`Company not found: ${slug}`);
+  return row.id;
+}
+
 // ============ SYSTEM PROMPT FOR CHAT ============
 const SYSTEM_PROMPT = `You are the AI-in-a-Box Dev Dashboard assistant. You help the Digital Alpha team manage AI implementations across their portfolio companies.
 
 You have access to tools that let you:
 - View and update company status, milestones, and requirements
-- Track dev tasks and assignments  
+- Track dev tasks and assignments
 - Manage documents and files (upload, list, read content, delete)
 - Track deployments and their components (GitHub, Frontend, MCP Server, Database) with health checks
 - Read Gmail inbox and search emails
@@ -450,12 +472,12 @@ const tools = [
   {
     name: "list_deployments",
     description: "List all deployments with their status",
-    inputSchema: { 
-      type: "object", 
+    inputSchema: {
+      type: "object",
       properties: {
         status: { type: "string", enum: ["active", "deploying", "failed", "stopped"], description: "Optional filter by status" }
       },
-      required: [] 
+      required: []
     }
   },
   {
@@ -690,245 +712,174 @@ const tools = [
 // ============ TOOL HANDLERS ============
 const handlers = {
   async list_companies() {
-    const { data, error } = await supabase
-      .from('companies')
-      .select('id, slug, name, description, status, tools, created_at');
-    if (error) throw error;
-    return data;
+    return await query('SELECT id, slug, name, description, status, tools, created_at FROM companies');
   },
 
   async get_company({ slug }) {
-    const { data, error } = await supabase
-      .from('companies')
-      .select(`
-        *,
-        contacts(*),
-        milestones(*),
-        documents(*),
-        requirements(*),
-        activity(*)
-      `)
-      .eq('slug', slug)
-      .single();
-    if (error) throw error;
-    
-    if (data.milestones) data.milestones.sort((a, b) => a.order_index - b.order_index);
-    if (data.activity) data.activity.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    
-    return data;
+    const company = await queryOne('SELECT * FROM companies WHERE slug = $1', [slug]);
+    if (!company) throw new Error(`Company not found: ${slug}`);
+
+    const [contacts, milestones, documents, requirements, activity] = await Promise.all([
+      query('SELECT * FROM contacts WHERE company_id = $1', [company.id]),
+      query('SELECT * FROM milestones WHERE company_id = $1 ORDER BY order_index', [company.id]),
+      query('SELECT * FROM documents WHERE company_id = $1', [company.id]),
+      query('SELECT * FROM requirements WHERE company_id = $1', [company.id]),
+      query('SELECT * FROM activity WHERE company_id = $1 ORDER BY created_at DESC', [company.id]),
+    ]);
+
+    return { ...company, contacts, milestones, documents, requirements, activity };
   },
 
   async update_company_status({ slug, status }) {
-    const { data, error } = await supabase
-      .from('companies')
-      .update({ status, updated_at: new Date().toISOString() })
-      .eq('slug', slug)
-      .select();
-    if (error) throw error;
-    return { success: true, company: data[0] };
+    const rows = await query(
+      'UPDATE companies SET status = $1, updated_at = NOW() WHERE slug = $2 RETURNING *',
+      [status, slug]
+    );
+    return { success: true, company: rows[0] };
   },
 
   async list_milestones({ slug }) {
-    const { data: company } = await supabase
-      .from('companies').select('id').eq('slug', slug).single();
-    if (!company) throw new Error(`Company not found: ${slug}`);
-    
-    const { data, error } = await supabase
-      .from('milestones')
-      .select('*')
-      .eq('company_id', company.id)
-      .order('order_index');
-    if (error) throw error;
-    return data;
+    const companyId = await getCompanyId(slug);
+    return await query('SELECT * FROM milestones WHERE company_id = $1 ORDER BY order_index', [companyId]);
   },
 
   async update_milestone({ milestone_id, status, notes }) {
-    const update = { 
-      status,
-      updated_at: new Date().toISOString()
-    };
-    if (status === 'done') update.completed_at = new Date().toISOString();
-    if (notes) update.notes = notes;
-    
-    const { data, error } = await supabase
-      .from('milestones')
-      .update(update)
-      .eq('id', milestone_id)
-      .select();
-    if (error) throw error;
-    return { success: true, milestone: data[0] };
+    const sets = ['status = $1', 'updated_at = NOW()'];
+    const params = [status];
+    let idx = 2;
+
+    if (status === 'done') {
+      sets.push(`completed_at = NOW()`);
+    }
+    if (notes) {
+      sets.push(`notes = $${idx}`);
+      params.push(notes);
+      idx++;
+    }
+    params.push(milestone_id);
+
+    const rows = await query(
+      `UPDATE milestones SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+      params
+    );
+    return { success: true, milestone: rows[0] };
   },
 
   async add_milestone({ slug, title, due_date }) {
-    const { data: company } = await supabase
-      .from('companies').select('id').eq('slug', slug).single();
-    if (!company) throw new Error(`Company not found: ${slug}`);
-    
-    const { data: existing } = await supabase
-      .from('milestones')
-      .select('order_index')
-      .eq('company_id', company.id)
-      .order('order_index', { ascending: false })
-      .limit(1);
-    
-    const order_index = existing?.length ? existing[0].order_index + 1 : 0;
-    
-    const { data, error } = await supabase
-      .from('milestones')
-      .insert({ company_id: company.id, title, due_date, order_index })
-      .select();
-    if (error) throw error;
-    return { success: true, milestone: data[0] };
+    const companyId = await getCompanyId(slug);
+    const existing = await queryOne(
+      'SELECT order_index FROM milestones WHERE company_id = $1 ORDER BY order_index DESC LIMIT 1',
+      [companyId]
+    );
+    const order_index = existing ? existing.order_index + 1 : 0;
+
+    const rows = await query(
+      'INSERT INTO milestones (company_id, title, due_date, order_index) VALUES ($1, $2, $3, $4) RETURNING *',
+      [companyId, title, due_date || null, order_index]
+    );
+    return { success: true, milestone: rows[0] };
   },
 
   async add_note({ slug, content, type = 'note' }) {
-    const { data: company } = await supabase
-      .from('companies').select('id').eq('slug', slug).single();
-    if (!company) throw new Error(`Company not found: ${slug}`);
-    
-    const { data, error } = await supabase
-      .from('activity')
-      .insert({ company_id: company.id, content, type })
-      .select();
-    if (error) throw error;
-    return { success: true, activity: data[0] };
+    const companyId = await getCompanyId(slug);
+    const rows = await query(
+      'INSERT INTO activity (company_id, content, type) VALUES ($1, $2, $3) RETURNING *',
+      [companyId, content, type]
+    );
+    return { success: true, activity: rows[0] };
   },
 
   async get_recent_activity({ slug, limit = 20 }) {
-    let query = supabase
-      .from('activity')
-      .select('*, companies(name, slug)')
-      .order('created_at', { ascending: false })
-      .limit(limit);
-    
     if (slug) {
-      const { data: company } = await supabase
-        .from('companies').select('id').eq('slug', slug).single();
-      if (company) {
-        query = query.eq('company_id', company.id);
-      }
+      const companyId = await getCompanyId(slug);
+      return await query(
+        `SELECT a.*, json_build_object('name', c.name, 'slug', c.slug) AS companies
+         FROM activity a LEFT JOIN companies c ON a.company_id = c.id
+         WHERE a.company_id = $1 ORDER BY a.created_at DESC LIMIT $2`,
+        [companyId, limit]
+      );
     }
-    
-    const { data, error } = await query;
-    if (error) throw error;
-    return data;
+    return await query(
+      `SELECT a.*, json_build_object('name', c.name, 'slug', c.slug) AS companies
+       FROM activity a LEFT JOIN companies c ON a.company_id = c.id
+       ORDER BY a.created_at DESC LIMIT $1`,
+      [limit]
+    );
   },
 
   async update_requirement({ slug, item, status }) {
-    const { data: company } = await supabase
-      .from('companies').select('id').eq('slug', slug).single();
-    if (!company) throw new Error(`Company not found: ${slug}`);
-    
-    const { data, error } = await supabase
-      .from('requirements')
-      .update({ status, updated_at: new Date().toISOString() })
-      .eq('company_id', company.id)
-      .ilike('item', `%${item}%`)
-      .select();
-    if (error) throw error;
-    return { success: true, requirement: data[0] };
+    const companyId = await getCompanyId(slug);
+    const rows = await query(
+      `UPDATE requirements SET status = $1, updated_at = NOW()
+       WHERE company_id = $2 AND item ILIKE $3 RETURNING *`,
+      [status, companyId, `%${item}%`]
+    );
+    return { success: true, requirement: rows[0] };
   },
 
   async add_requirement({ slug, item, status = 'needed' }) {
-    const { data: company } = await supabase
-      .from('companies').select('id').eq('slug', slug).single();
-    if (!company) throw new Error(`Company not found: ${slug}`);
-    
-    const { data, error } = await supabase
-      .from('requirements')
-      .insert({ company_id: company.id, item, status })
-      .select();
-    if (error) throw error;
-    return { success: true, requirement: data[0] };
+    const companyId = await getCompanyId(slug);
+    const rows = await query(
+      'INSERT INTO requirements (company_id, item, status) VALUES ($1, $2, $3) RETURNING *',
+      [companyId, item, status]
+    );
+    return { success: true, requirement: rows[0] };
   },
 
   async list_documents({ slug }) {
-    const { data: company } = await supabase
-      .from('companies').select('id').eq('slug', slug).single();
-    if (!company) throw new Error(`Company not found: ${slug}`);
-    
-    const { data, error } = await supabase
-      .from('documents')
-      .select('*')
-      .eq('company_id', company.id)
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    return data;
+    const companyId = await getCompanyId(slug);
+    return await query(
+      'SELECT * FROM documents WHERE company_id = $1 ORDER BY uploaded_at DESC',
+      [companyId]
+    );
   },
 
   async add_document({ slug, name, type, url, notes }) {
-    const { data: company } = await supabase
-      .from('companies').select('id').eq('slug', slug).single();
-    if (!company) throw new Error(`Company not found: ${slug}`);
-    
-    const { data, error } = await supabase
-      .from('documents')
-      .insert({ company_id: company.id, name, type, url, notes })
-      .select();
-    if (error) throw error;
-    return { success: true, document: data[0] };
+    const companyId = await getCompanyId(slug);
+    const rows = await query(
+      'INSERT INTO documents (company_id, name, type, url, notes) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [companyId, name, type, url || null, notes || null]
+    );
+    return { success: true, document: rows[0] };
   },
 
   async add_contact({ slug, name, role, email, phone }) {
-    const { data: company } = await supabase
-      .from('companies').select('id').eq('slug', slug).single();
-    if (!company) throw new Error(`Company not found: ${slug}`);
-    
-    const { data, error } = await supabase
-      .from('contacts')
-      .insert({ company_id: company.id, name, role, email, phone })
-      .select();
-    if (error) throw error;
-    return { success: true, contact: data[0] };
+    const companyId = await getCompanyId(slug);
+    const rows = await query(
+      'INSERT INTO contacts (company_id, name, role, email, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [companyId, name, role || null, email || null, phone || null]
+    );
+    return { success: true, contact: rows[0] };
   },
 
   async list_contacts({ slug }) {
-    const { data: company } = await supabase
-      .from('companies').select('id').eq('slug', slug).single();
-    if (!company) throw new Error(`Company not found: ${slug}`);
-    
-    const { data, error } = await supabase
-      .from('contacts')
-      .select('*')
-      .eq('company_id', company.id);
-    if (error) throw error;
-    return data;
+    const companyId = await getCompanyId(slug);
+    return await query('SELECT * FROM contacts WHERE company_id = $1', [companyId]);
   },
 
   async get_portfolio_summary() {
-    const { data: companies, error } = await supabase
-      .from('companies')
-      .select(`
-        slug, name, status,
-        milestones(status)
-      `);
-    if (error) throw error;
-    
-    return companies.map(c => {
-      const total = c.milestones?.length || 0;
-      const done = c.milestones?.filter(m => m.status === 'done').length || 0;
-      return {
-        name: c.name,
-        slug: c.slug,
-        status: c.status,
-        progress: total ? Math.round((done / total) * 100) : 0,
-        milestones: `${done}/${total}`
-      };
-    });
+    const companies = await query(`
+      SELECT c.slug, c.name, c.status,
+        COUNT(m.id) AS total_milestones,
+        COUNT(m.id) FILTER (WHERE m.status = 'done') AS done_milestones
+      FROM companies c
+      LEFT JOIN milestones m ON m.company_id = c.id
+      GROUP BY c.id, c.slug, c.name, c.status
+    `);
+    return companies.map(c => ({
+      name: c.name,
+      slug: c.slug,
+      status: c.status,
+      progress: c.total_milestones > 0 ? Math.round((c.done_milestones / c.total_milestones) * 100) : 0,
+      milestones: `${c.done_milestones}/${c.total_milestones}`
+    }));
   },
 
   async send_email({ to, subject, body }) {
     if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
       throw new Error('Email not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD environment variables.');
     }
-    
-    await transporter.sendMail({
-      from: process.env.GMAIL_USER,
-      to,
-      subject,
-      html: body
-    });
-    
+    await transporter.sendMail({ from: process.env.GMAIL_USER, to, subject, html: body });
     return { success: true, message: `Email sent to ${to}` };
   },
 
@@ -936,188 +887,137 @@ const handlers = {
     if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
       throw new Error('Email not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD environment variables.');
     }
-    
-    const { data: companies, error } = await supabase
-      .from('companies')
-      .select(`
-        slug, name, status, description,
-        milestones(title, status, order_index),
-        requirements(item, status)
-      `);
-    if (error) throw error;
-    
-    const date = new Date().toLocaleDateString('en-US', { 
-      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' 
-    });
-    
+
+    const companies = await query(`
+      SELECT c.*, json_agg(DISTINCT jsonb_build_object('title', m.title, 'status', m.status, 'order_index', m.order_index)) FILTER (WHERE m.id IS NOT NULL) AS milestones,
+        json_agg(DISTINCT jsonb_build_object('item', r.item, 'status', r.status)) FILTER (WHERE r.id IS NOT NULL) AS requirements
+      FROM companies c
+      LEFT JOIN milestones m ON m.company_id = c.id
+      LEFT JOIN requirements r ON r.company_id = c.id
+      GROUP BY c.id
+    `);
+
+    const date = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
     let html = `
       <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto;">
-        <h1 style="color: #1a365d; border-bottom: 2px solid #1a365d; padding-bottom: 10px;">
-          AI-in-a-Box Portfolio Update
-        </h1>
+        <h1 style="color: #1a365d; border-bottom: 2px solid #1a365d; padding-bottom: 10px;">AI-in-a-Box Portfolio Update</h1>
         <p style="color: #666; font-size: 14px;">${date}</p>
-        
         <h2 style="color: #1a365d; margin-top: 30px;">Portfolio Summary</h2>
         <table style="width: 100%; border-collapse: collapse; margin-bottom: 30px;">
           <tr style="background: #f0f4f8;">
             <th style="padding: 12px; text-align: left; border-bottom: 2px solid #ddd;">Company</th>
             <th style="padding: 12px; text-align: left; border-bottom: 2px solid #ddd;">Status</th>
             <th style="padding: 12px; text-align: left; border-bottom: 2px solid #ddd;">Progress</th>
-          </tr>
-    `;
-    
+          </tr>`;
+
     for (const c of companies) {
-      const total = c.milestones?.length || 0;
-      const done = c.milestones?.filter(m => m.status === 'done').length || 0;
+      const ms = c.milestones || [];
+      const total = ms.length;
+      const done = ms.filter(m => m.status === 'done').length;
       const progress = total ? Math.round((done / total) * 100) : 0;
-      
-      const statusColor = {
-        'active': '#28a745',
-        'discovery': '#ffc107',
-        'pilot': '#17a2b8',
-        'deployed': '#007bff'
-      }[c.status] || '#6c757d';
-      
-      html += `
-        <tr>
-          <td style="padding: 12px; border-bottom: 1px solid #ddd;"><strong>${c.name}</strong></td>
-          <td style="padding: 12px; border-bottom: 1px solid #ddd;">
-            <span style="background: ${statusColor}; color: white; padding: 4px 10px; border-radius: 12px; font-size: 12px;">
-              ${c.status}
-            </span>
-          </td>
-          <td style="padding: 12px; border-bottom: 1px solid #ddd;">
-            <div style="background: #e9ecef; border-radius: 10px; height: 20px; width: 150px; overflow: hidden;">
-              <div style="background: linear-gradient(90deg, #28a745, #20c997); height: 100%; width: ${progress}%;"></div>
-            </div>
-            <span style="font-size: 12px; color: #666;">${done}/${total} milestones (${progress}%)</span>
-          </td>
-        </tr>
-      `;
+      const statusColor = { active: '#28a745', discovery: '#ffc107', pilot: '#17a2b8', deployed: '#007bff' }[c.status] || '#6c757d';
+
+      html += `<tr>
+        <td style="padding: 12px; border-bottom: 1px solid #ddd;"><strong>${c.name}</strong></td>
+        <td style="padding: 12px; border-bottom: 1px solid #ddd;"><span style="background: ${statusColor}; color: white; padding: 4px 10px; border-radius: 12px; font-size: 12px;">${c.status}</span></td>
+        <td style="padding: 12px; border-bottom: 1px solid #ddd;">
+          <div style="background: #e9ecef; border-radius: 10px; height: 20px; width: 150px; overflow: hidden;">
+            <div style="background: linear-gradient(90deg, #28a745, #20c997); height: 100%; width: ${progress}%;"></div>
+          </div>
+          <span style="font-size: 12px; color: #666;">${done}/${total} milestones (${progress}%)</span>
+        </td></tr>`;
     }
-    
     html += '</table>';
-    
+
     if (include_details) {
       for (const c of companies) {
-        html += `
-          <div style="margin-bottom: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
-            <h3 style="color: #1a365d; margin-top: 0;">${c.name}</h3>
-            <p style="color: #666; font-size: 14px;">${c.description || ''}</p>
-        `;
-        
-        const sortedMilestones = (c.milestones || [])
-          .filter(m => !m.title.startsWith('[FUTURE]'))
-          .sort((a, b) => a.order_index - b.order_index);
-        
+        html += `<div style="margin-bottom: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
+          <h3 style="color: #1a365d; margin-top: 0;">${c.name}</h3>
+          <p style="color: #666; font-size: 14px;">${c.description || ''}</p>`;
+
+        const sortedMilestones = (c.milestones || []).filter(m => !m.title.startsWith('[FUTURE]')).sort((a, b) => a.order_index - b.order_index);
         if (sortedMilestones.length > 0) {
           html += '<p style="margin-bottom: 5px;"><strong>Milestones:</strong></p><ul style="margin-top: 5px;">';
           for (const m of sortedMilestones) {
-            const icon = m.status === 'done' ? '✓' : '○';
+            const icon = m.status === 'done' ? '&#10003;' : '&#9675;';
             const style = m.status === 'done' ? 'color: #28a745;' : 'color: #666;';
             html += `<li style="${style}">${icon} ${m.title}</li>`;
           }
           html += '</ul>';
         }
-        
+
         const needed = (c.requirements || []).filter(r => r.status === 'needed');
         if (needed.length > 0) {
           html += '<p style="margin-bottom: 5px;"><strong>Still Need:</strong></p><ul style="margin-top: 5px;">';
-          for (const r of needed) {
-            html += `<li style="color: #856404;">${r.item}</li>`;
-          }
+          for (const r of needed) html += `<li style="color: #856404;">${r.item}</li>`;
           html += '</ul>';
         }
-        
         html += '</div>';
       }
     }
-    
-    html += `
-        <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
-        <p style="color: #888; font-size: 12px;">
-          Sent from AI-in-a-Box Project Tracker
-        </p>
-      </div>
-    `;
-    
-    const emailSubject = subject || `AI-in-a-Box Portfolio Update — ${date}`;
-    
-    await transporter.sendMail({
-      from: process.env.GMAIL_USER,
-      to,
-      subject: emailSubject,
-      html
-    });
-    
-    await supabase.from('activity').insert({
-      company_id: null,
-      type: 'email',
-      content: `Sent portfolio update to ${to}`
-    });
-    
+
+    html += `<hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+      <p style="color: #888; font-size: 12px;">Sent from AI-in-a-Box Project Tracker</p></div>`;
+
+    const emailSubject = subject || `AI-in-a-Box Portfolio Update \u2014 ${date}`;
+    await transporter.sendMail({ from: process.env.GMAIL_USER, to, subject: emailSubject, html });
+
+    await query(
+      "INSERT INTO activity (company_id, type, content) VALUES (NULL, 'email', $1)",
+      [`Sent portfolio update to ${to}`]
+    );
+
     return { success: true, message: `Portfolio update sent to ${to}` };
   },
 
   // ============ DEV TASKS HANDLERS ============
   async list_dev_tasks({ status, assigned_to, priority }) {
-    let query = supabase
-      .from('dev_tasks')
-      .select('*, companies(name, slug)')
-      .order('priority')
-      .order('due_date');
-    
-    if (status) query = query.eq('status', status);
-    if (assigned_to) query = query.eq('assigned_to', assigned_to);
-    if (priority) query = query.eq('priority', priority);
-    
-    const { data, error } = await query;
-    if (error) throw error;
-    return data;
+    const conditions = [];
+    const params = [];
+    let idx = 1;
+
+    if (status) { conditions.push(`dt.status = $${idx++}`); params.push(status); }
+    if (assigned_to) { conditions.push(`dt.assigned_to = $${idx++}`); params.push(assigned_to); }
+    if (priority) { conditions.push(`dt.priority = $${idx++}`); params.push(priority); }
+
+    const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+    return await query(
+      `SELECT dt.*, json_build_object('name', c.name, 'slug', c.slug) AS companies
+       FROM dev_tasks dt LEFT JOIN companies c ON dt.company_id = c.id
+       ${where} ORDER BY dt.priority, dt.due_date`,
+      params
+    );
   },
 
   async add_dev_task({ title, description, assigned_to, priority, steps, due_date }) {
-    const { data, error } = await supabase
-      .from('dev_tasks')
-      .insert({
-        title,
-        description,
-        assigned_to,
-        priority: priority || 'medium',
-        steps: steps || [],
-        due_date
-      })
-      .select()
-      .single();
-    if (error) throw error;
-    return { success: true, task: data };
+    const rows = await query(
+      `INSERT INTO dev_tasks (title, description, assigned_to, priority, steps, due_date)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [title, description || null, assigned_to || null, priority || 'medium', JSON.stringify(steps || []), due_date || null]
+    );
+    return { success: true, task: rows[0] };
   },
 
   async update_dev_task({ task_id, status, assigned_to, priority }) {
-    const updates = { updated_at: new Date().toISOString() };
-    if (status) {
-      updates.status = status;
-      if (status === 'done') updates.completed_at = new Date().toISOString();
-    }
-    if (assigned_to) updates.assigned_to = assigned_to;
-    if (priority) updates.priority = priority;
-    
-    const { data, error } = await supabase
-      .from('dev_tasks')
-      .update(updates)
-      .eq('id', task_id)
-      .select()
-      .single();
-    if (error) throw error;
-    return { success: true, task: data };
+    const sets = ['updated_at = NOW()'];
+    const params = [];
+    let idx = 1;
+
+    if (status) { sets.push(`status = $${idx++}`); params.push(status); if (status === 'done') sets.push('completed_at = NOW()'); }
+    if (assigned_to) { sets.push(`assigned_to = $${idx++}`); params.push(assigned_to); }
+    if (priority) { sets.push(`priority = $${idx++}`); params.push(priority); }
+
+    params.push(task_id);
+    const rows = await query(
+      `UPDATE dev_tasks SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+      params
+    );
+    return { success: true, task: rows[0] };
   },
 
   async delete_dev_task({ task_id }) {
-    const { error } = await supabase
-      .from('dev_tasks')
-      .delete()
-      .eq('id', task_id);
-    if (error) throw error;
+    await query('DELETE FROM dev_tasks WHERE id = $1', [task_id]);
     return { success: true, deleted: task_id };
   },
 
@@ -1125,498 +1025,306 @@ const handlers = {
   async upload_document({ slug, filename, content_base64, content_type, category, description }) {
     let company_id = null;
     if (slug !== 'platform' && slug !== 'dev') {
-      const { data: company } = await supabase
-        .from('companies')
-        .select('id')
-        .eq('slug', slug)
-        .single();
-      if (!company) throw new Error(`Company not found: ${slug}`);
-      company_id = company.id;
+      company_id = await getCompanyId(slug);
     }
 
     const buffer = Buffer.from(content_base64, 'base64');
     const bucket_path = `${slug}/${filename}`;
-    
-    const { data: uploadData, error: uploadError } = await supabase.storage
-      .from('documents')
-      .upload(bucket_path, buffer, {
-        contentType: content_type,
-        upsert: true
-      });
-    
-    if (uploadError) throw uploadError;
-    
-    const { data: urlData } = supabase.storage
-      .from('documents')
-      .getPublicUrl(bucket_path);
-    
+
+    // Upload to GCS
+    const bucket = gcs.bucket(GCS_BUCKET);
+    const file = bucket.file(bucket_path);
+    await file.save(buffer, { contentType: content_type, resumable: false });
+    await file.makePublic();
+    const publicUrl = `https://storage.googleapis.com/${GCS_BUCKET}/${bucket_path}`;
+
     const ext = filename.split('.').pop().toLowerCase();
-    
-    const { data: doc, error: dbError } = await supabase
-      .from('documents')
-      .insert({
-        company_id,
-        name: filename,
-        type: category || 'general',
-        url: urlData.publicUrl,
-        file_url: urlData.publicUrl,
-        bucket_path,
-        file_type: ext,
-        category: category || 'general',
-        notes: description
-      })
-      .select()
-      .single();
-    
-    if (dbError) throw dbError;
-    
-    return { 
-      success: true, 
-      document: doc,
-      url: urlData.publicUrl
-    };
+
+    const rows = await query(
+      `INSERT INTO documents (company_id, name, type, url, file_url, bucket_path, file_type, category, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [company_id, filename, category || 'general', publicUrl, publicUrl, bucket_path, ext, category || 'general', description || null]
+    );
+
+    return { success: true, document: rows[0], url: publicUrl };
   },
 
   async get_document_content({ document_id }) {
-    const { data: doc, error } = await supabase
-      .from('documents')
-      .select('*, companies(name, slug)')
-      .eq('id', document_id)
-      .single();
-    
-    if (error) throw error;
+    const doc = await queryOne(
+      `SELECT d.*, json_build_object('name', c.name, 'slug', c.slug) AS companies
+       FROM documents d LEFT JOIN companies c ON d.company_id = c.id WHERE d.id = $1`,
+      [document_id]
+    );
     if (!doc) throw new Error('Document not found');
-    
+
     const textFormats = ['md', 'txt', 'json', 'csv', 'html', 'xml', 'js', 'ts', 'py', 'sql'];
     const ext = doc.file_type?.toLowerCase();
-    
+
     if (!textFormats.includes(ext)) {
-      return {
-        document: doc,
-        content: null,
-        message: `Cannot read content of .${ext} files directly. Use the URL to view: ${doc.file_url}`
-      };
+      return { document: doc, content: null, message: `Cannot read content of .${ext} files directly. Use the URL to view: ${doc.file_url}` };
     }
-    
+
     try {
       const response = await fetch(doc.file_url);
       if (!response.ok) throw new Error(`Failed to fetch: ${response.status}`);
       let content = await response.text();
-      
       const truncated = content.length > 50000;
-      if (truncated) {
-        content = content.substring(0, 50000) + '\n\n... [truncated]';
-      }
-      
-      return {
-        document: doc,
-        content,
-        truncated
-      };
+      if (truncated) content = content.substring(0, 50000) + '\n\n... [truncated]';
+      return { document: doc, content, truncated };
     } catch (fetchError) {
-      return {
-        document: doc,
-        content: null,
-        error: fetchError.message
-      };
+      return { document: doc, content: null, error: fetchError.message };
     }
   },
 
   async list_all_documents({ slug, category }) {
-    let query = supabase
-      .from('documents')
-      .select('*, companies(name, slug)')
-      .order('created_at', { ascending: false });
-    
+    const conditions = [];
+    const params = [];
+    let idx = 1;
+
     if (slug) {
       if (slug === 'platform' || slug === 'dev') {
-        query = query.is('company_id', null);
+        conditions.push('d.company_id IS NULL');
       } else {
-        const { data: company } = await supabase
-          .from('companies')
-          .select('id')
-          .eq('slug', slug)
-          .single();
-        if (company) {
-          query = query.eq('company_id', company.id);
-        }
+        const companyId = await getCompanyId(slug);
+        conditions.push(`d.company_id = $${idx++}`);
+        params.push(companyId);
       }
     }
-    
     if (category) {
-      query = query.eq('category', category);
+      conditions.push(`d.category = $${idx++}`);
+      params.push(category);
     }
-    
-    const { data, error } = await query;
-    if (error) throw error;
-    
-    return data;
+
+    const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+    return await query(
+      `SELECT d.*, json_build_object('name', c.name, 'slug', c.slug) AS companies
+       FROM documents d LEFT JOIN companies c ON d.company_id = c.id
+       ${where} ORDER BY d.uploaded_at DESC`,
+      params
+    );
   },
 
   async delete_document({ document_id }) {
-    const { data: doc } = await supabase
-      .from('documents')
-      .select('bucket_path')
-      .eq('id', document_id)
-      .single();
-    
+    const doc = await queryOne('SELECT bucket_path FROM documents WHERE id = $1', [document_id]);
+
     if (doc?.bucket_path) {
-      await supabase.storage
-        .from('documents')
-        .remove([doc.bucket_path]);
+      try {
+        await gcs.bucket(GCS_BUCKET).file(doc.bucket_path).delete();
+      } catch (e) {
+        console.warn('GCS delete failed (may not exist):', e.message);
+      }
     }
-    
-    const { error } = await supabase
-      .from('documents')
-      .delete()
-      .eq('id', document_id);
-    
-    if (error) throw error;
-    
+
+    await query('DELETE FROM documents WHERE id = $1', [document_id]);
     return { success: true, deleted: document_id };
   },
 
   // ============ DEPLOYMENT HANDLERS ============
   async list_deployments({ status }) {
-    let query = supabase
-      .from('deployments')
-      .select('*')
-      .order('created_at', { ascending: false });
-    
     if (status) {
-      query = query.eq('status', status);
+      return await query('SELECT * FROM deployments WHERE status = $1 ORDER BY created_at DESC', [status]);
     }
-    
-    const { data, error } = await query;
-    if (error) throw error;
-    return data;
+    return await query('SELECT * FROM deployments ORDER BY created_at DESC');
   },
 
   async get_deployment({ slug, deployment_id }) {
-    let query = supabase.from('deployments').select('*');
-    
+    let deployment;
     if (deployment_id) {
-      query = query.eq('id', deployment_id);
+      deployment = await queryOne('SELECT * FROM deployments WHERE id = $1', [deployment_id]);
     } else if (slug) {
-      query = query.eq('slug', slug);
+      deployment = await queryOne('SELECT * FROM deployments WHERE slug = $1', [slug]);
     } else {
       throw new Error('Must provide slug or deployment_id');
     }
-    
-    const { data: deployment, error } = await query.single();
-    if (error) throw error;
     if (!deployment) throw new Error('Deployment not found');
-    
-    const { data: components, error: compError } = await supabase
-      .from('deployment_components')
-      .select('*')
-      .eq('deployment_id', deployment.id);
-    
-    if (compError) throw compError;
-    
+
+    const components = await query('SELECT * FROM deployment_components WHERE deployment_id = $1', [deployment.id]);
     const result = { ...deployment };
-    
-    for (const comp of components || []) {
+    for (const comp of components) {
       result[comp.component_type] = {
         status: comp.status,
         url: comp.url,
         last_checked: comp.last_checked,
         error_message: comp.error_message,
-        ...comp.config
+        ...(comp.config || {})
       };
     }
-    
     return result;
   },
 
   async add_deployment({ name, description, github_url, frontend_url, mcp_server_url, database_type, database_provider }) {
-    const slug = name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
-    
-    const { data: existing } = await supabase
-      .from('deployments')
-      .select('id')
-      .eq('slug', slug)
-      .single();
-    
-    if (existing) {
-      throw new Error(`Deployment with slug "${slug}" already exists`);
-    }
-    
-    const { data: deployment, error } = await supabase
-      .from('deployments')
-      .insert({
-        name,
-        slug,
-        description,
-        status: 'active'
-      })
-      .select()
-      .single();
-    
-    if (error) throw error;
-    
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+    const existing = await queryOne('SELECT id FROM deployments WHERE slug = $1', [slug]);
+    if (existing) throw new Error(`Deployment with slug "${slug}" already exists`);
+
+    const rows = await query(
+      'INSERT INTO deployments (name, slug, description, status) VALUES ($1, $2, $3, $4) RETURNING *',
+      [name, slug, description || null, 'active']
+    );
+    const deployment = rows[0];
+
     const components = [
-      {
-        deployment_id: deployment.id,
-        component_type: 'github',
-        status: github_url ? 'unknown' : 'not_configured',
-        url: github_url,
-        config: github_url ? { repo_url: github_url, branch: 'main' } : {}
-      },
-      {
-        deployment_id: deployment.id,
-        component_type: 'frontend',
-        status: frontend_url ? 'unknown' : 'not_configured',
-        url: frontend_url,
-        config: {}
-      },
-      {
-        deployment_id: deployment.id,
-        component_type: 'mcp_server',
-        status: mcp_server_url ? 'unknown' : 'not_configured',
-        url: mcp_server_url,
-        config: {}
-      },
-      {
-        deployment_id: deployment.id,
-        component_type: 'database',
-        status: database_type ? 'unknown' : 'not_configured',
-        url: null,
-        config: {
-          type: database_type || null,
-          provider: database_provider || null
-        }
-      }
+      { deployment_id: deployment.id, component_type: 'github', status: github_url ? 'unknown' : 'not_configured', url: github_url || null, config: github_url ? JSON.stringify({ repo_url: github_url, branch: 'main' }) : '{}' },
+      { deployment_id: deployment.id, component_type: 'frontend', status: frontend_url ? 'unknown' : 'not_configured', url: frontend_url || null, config: '{}' },
+      { deployment_id: deployment.id, component_type: 'mcp_server', status: mcp_server_url ? 'unknown' : 'not_configured', url: mcp_server_url || null, config: '{}' },
+      { deployment_id: deployment.id, component_type: 'database', status: database_type ? 'unknown' : 'not_configured', url: null, config: JSON.stringify({ type: database_type || null, provider: database_provider || null }) },
     ];
-    
-    const { error: compError } = await supabase
-      .from('deployment_components')
-      .insert(components);
-    
-    if (compError) throw compError;
-    
+
+    for (const comp of components) {
+      await query(
+        'INSERT INTO deployment_components (deployment_id, component_type, status, url, config) VALUES ($1, $2, $3, $4, $5)',
+        [comp.deployment_id, comp.component_type, comp.status, comp.url, comp.config]
+      );
+    }
+
     return await handlers.get_deployment({ deployment_id: deployment.id });
   },
 
   async update_deployment({ deployment_id, name, description, status }) {
-    const updates = { updated_at: new Date().toISOString() };
-    if (name) updates.name = name;
-    if (description !== undefined) updates.description = description;
-    if (status) updates.status = status;
-    
-    const { data, error } = await supabase
-      .from('deployments')
-      .update(updates)
-      .eq('id', deployment_id)
-      .select()
-      .single();
-    
-    if (error) throw error;
-    return { success: true, deployment: data };
+    const sets = ['updated_at = NOW()'];
+    const params = [];
+    let idx = 1;
+
+    if (name) { sets.push(`name = $${idx++}`); params.push(name); }
+    if (description !== undefined) { sets.push(`description = $${idx++}`); params.push(description); }
+    if (status) { sets.push(`status = $${idx++}`); params.push(status); }
+
+    params.push(deployment_id);
+    const rows = await query(
+      `UPDATE deployments SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+      params
+    );
+    return { success: true, deployment: rows[0] };
   },
 
   async update_deployment_component({ deployment_id, component, status, url, config }) {
-    const updates = { updated_at: new Date().toISOString() };
-    if (status) updates.status = status;
-    if (url !== undefined) updates.url = url;
+    const sets = ['updated_at = NOW()'];
+    const params = [];
+    let idx = 1;
+
+    if (status) { sets.push(`status = $${idx++}`); params.push(status); }
+    if (url !== undefined) { sets.push(`url = $${idx++}`); params.push(url); }
     if (config) {
-      const { data: existing } = await supabase
-        .from('deployment_components')
-        .select('config')
-        .eq('deployment_id', deployment_id)
-        .eq('component_type', component)
-        .single();
-      
-      updates.config = { ...(existing?.config || {}), ...config };
+      const existing = await queryOne(
+        'SELECT config FROM deployment_components WHERE deployment_id = $1 AND component_type = $2',
+        [deployment_id, component]
+      );
+      const merged = { ...(existing?.config || {}), ...config };
+      sets.push(`config = $${idx++}`);
+      params.push(JSON.stringify(merged));
     }
-    
-    const { data, error } = await supabase
-      .from('deployment_components')
-      .update(updates)
-      .eq('deployment_id', deployment_id)
-      .eq('component_type', component)
-      .select()
-      .single();
-    
-    if (error) throw error;
-    return { success: true, component: data };
+
+    params.push(deployment_id, component);
+    const rows = await query(
+      `UPDATE deployment_components SET ${sets.join(', ')} WHERE deployment_id = $${idx} AND component_type = $${idx + 1} RETURNING *`,
+      params
+    );
+    return { success: true, component: rows[0] };
   },
 
   async delete_deployment({ deployment_id }) {
-    const { error } = await supabase
-      .from('deployments')
-      .delete()
-      .eq('id', deployment_id);
-    
-    if (error) throw error;
+    await query('DELETE FROM deployment_components WHERE deployment_id = $1', [deployment_id]);
+    await query('DELETE FROM deployments WHERE id = $1', [deployment_id]);
     return { success: true, deleted: deployment_id };
   },
 
   async check_deployment_health({ deployment_id }) {
-    const { data: components, error } = await supabase
-      .from('deployment_components')
-      .select('*')
-      .eq('deployment_id', deployment_id);
-    
-    if (error) throw error;
-    
+    const components = await query('SELECT * FROM deployment_components WHERE deployment_id = $1', [deployment_id]);
     const results = {};
-    
-    for (const comp of components || []) {
+
+    for (const comp of components) {
       if (!comp.url) {
         results[comp.component_type] = { status: 'not_configured', checked: false };
         continue;
       }
-      
+
       try {
         const startTime = Date.now();
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
-        
+
         let checkUrl = comp.url;
-        if (comp.component_type === 'mcp_server') {
-          checkUrl = comp.url.replace(/\/$/, '') + '/health';
-        }
-        
-        const response = await fetch(checkUrl, { 
-          method: 'GET',
-          signal: controller.signal
-        });
+        if (comp.component_type === 'mcp_server') checkUrl = comp.url.replace(/\/$/, '') + '/health';
+
+        const response = await fetch(checkUrl, { method: 'GET', signal: controller.signal });
         clearTimeout(timeout);
-        
         const latency = Date.now() - startTime;
-        
+
         let newStatus;
         let errorMessage = null;
-        
         if (response.ok) {
           newStatus = latency > 5000 ? 'degraded' : 'healthy';
         } else {
           newStatus = 'degraded';
           errorMessage = `HTTP ${response.status}`;
         }
-        
-        await supabase
-          .from('deployment_components')
-          .update({
-            status: newStatus,
-            last_checked: new Date().toISOString(),
-            error_message: errorMessage,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', comp.id);
-        
-        results[comp.component_type] = {
-          status: newStatus,
-          latency,
-          checked: true
-        };
-        
+
+        await query(
+          'UPDATE deployment_components SET status = $1, last_checked = NOW(), error_message = $2, updated_at = NOW() WHERE id = $3',
+          [newStatus, errorMessage, comp.id]
+        );
+        results[comp.component_type] = { status: newStatus, latency, checked: true };
       } catch (err) {
-        await supabase
-          .from('deployment_components')
-          .update({
-            status: 'down',
-            last_checked: new Date().toISOString(),
-            error_message: err.message,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', comp.id);
-        
-        results[comp.component_type] = {
-          status: 'down',
-          error: err.message,
-          checked: true
-        };
+        await query(
+          'UPDATE deployment_components SET status = $1, last_checked = NOW(), error_message = $2, updated_at = NOW() WHERE id = $3',
+          ['down', err.message, comp.id]
+        );
+        results[comp.component_type] = { status: 'down', error: err.message, checked: true };
       }
     }
-    
+
     return { deployment_id, health_check: results };
   },
 
   // ============ GMAIL HANDLERS ============
-  async list_emails({ folder = 'inbox', company_slug, query, max_results = 50 }) {
+  async list_emails({ folder = 'inbox', company_slug, query: searchQuery, max_results = 50 }) {
     if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REFRESH_TOKEN) {
       throw new Error('Google API not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN.');
     }
-    
+
     const auth = getGoogleAuth();
     const gmail = google.gmail({ version: 'v1', auth });
-    
-    // Get company contact emails if filtering by company
+
     let contactEmails = [];
     if (company_slug) {
-      const { data: company } = await supabase
-        .from('companies')
-        .select('id')
-        .eq('slug', company_slug)
-        .single();
-      
-      if (company) {
-        const { data: contacts } = await supabase
-          .from('contacts')
-          .select('email')
-          .eq('company_id', company.id);
-        
-        contactEmails = contacts?.map(c => c.email).filter(Boolean) || [];
+      const companyId = await getCompanyId(company_slug).catch(() => null);
+      if (companyId) {
+        const contacts = await query('SELECT email FROM contacts WHERE company_id = $1', [companyId]);
+        contactEmails = contacts.map(c => c.email).filter(Boolean);
       }
     }
 
-    // Build Gmail query
-    let q = query || '';
+    let q = searchQuery || '';
     if (folder === 'inbox') q = `in:inbox ${q}`.trim();
     else if (folder === 'sent') q = `in:sent ${q}`.trim();
     else if (folder === 'drafts') q = `in:drafts ${q}`.trim();
 
-    const listResponse = await gmail.users.messages.list({
-      userId: 'me',
-      maxResults: max_results,
-      q: q || undefined,
-    });
-
+    const listResponse = await gmail.users.messages.list({ userId: 'me', maxResults: max_results, q: q || undefined });
     const messages = listResponse.data.messages || [];
-    
-    // Fetch message details
-    const emails = await Promise.all(
-      messages.slice(0, 20).map(async (msg) => { // Limit to 20 for speed
-        const detail = await gmail.users.messages.get({
-          userId: 'me',
-          id: msg.id,
-          format: 'metadata',
-          metadataHeaders: ['From', 'To', 'Subject', 'Date'],
-        });
 
+    const emails = await Promise.all(
+      messages.slice(0, 20).map(async (msg) => {
+        const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'metadata', metadataHeaders: ['From', 'To', 'Subject', 'Date'] });
         const headers = detail.data.payload.headers;
         const getHeader = (name) => headers.find(h => h.name === name)?.value || '';
-
         return {
-          id: msg.id,
-          threadId: msg.threadId,
-          from: getHeader('From'),
-          to: getHeader('To'),
-          subject: getHeader('Subject'),
-          preview: detail.data.snippet || '',
-          date: getHeader('Date'),
-          read: !detail.data.labelIds?.includes('UNREAD'),
-          starred: detail.data.labelIds?.includes('STARRED') || false,
+          id: msg.id, threadId: msg.threadId, from: getHeader('From'), to: getHeader('To'),
+          subject: getHeader('Subject'), preview: detail.data.snippet || '', date: getHeader('Date'),
+          read: !detail.data.labelIds?.includes('UNREAD'), starred: detail.data.labelIds?.includes('STARRED') || false,
         };
       })
     );
 
-    // Filter by company contacts if specified
     let filteredEmails = emails;
     if (company_slug && contactEmails.length > 0) {
-      filteredEmails = emails.filter(email => 
-        contactEmails.some(contact => 
-          email.from.toLowerCase().includes(contact.toLowerCase()) || 
+      filteredEmails = emails.filter(email =>
+        contactEmails.some(contact =>
+          email.from.toLowerCase().includes(contact.toLowerCase()) ||
           email.to.toLowerCase().includes(contact.toLowerCase())
         )
       );
     }
-
     return filteredEmails;
   },
 
@@ -1624,56 +1332,31 @@ const handlers = {
     if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REFRESH_TOKEN) {
       throw new Error('Google API not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN.');
     }
-    
+
     const auth = getGoogleAuth();
     const gmail = google.gmail({ version: 'v1', auth });
-    
-    const detail = await gmail.users.messages.get({
-      userId: 'me',
-      id: email_id,
-      format: 'full',
-    });
-
+    const detail = await gmail.users.messages.get({ userId: 'me', id: email_id, format: 'full' });
     const headers = detail.data.payload.headers;
     const getHeader = (name) => headers.find(h => h.name === name)?.value || '';
 
-    // Extract body (handles multipart)
     const getBody = (payload) => {
-      if (payload.body?.data) {
-        return Buffer.from(payload.body.data, 'base64').toString('utf-8');
-      }
+      if (payload.body?.data) return Buffer.from(payload.body.data, 'base64').toString('utf-8');
       if (payload.parts) {
-        // Prefer text/plain
         for (const part of payload.parts) {
-          if (part.mimeType === 'text/plain' && part.body?.data) {
-            return Buffer.from(part.body.data, 'base64').toString('utf-8');
-          }
+          if (part.mimeType === 'text/plain' && part.body?.data) return Buffer.from(part.body.data, 'base64').toString('utf-8');
         }
-        // Fallback to text/html
         for (const part of payload.parts) {
-          if (part.mimeType === 'text/html' && part.body?.data) {
-            return Buffer.from(part.body.data, 'base64').toString('utf-8');
-          }
-          if (part.parts) {
-            const nested = getBody(part);
-            if (nested) return nested;
-          }
+          if (part.mimeType === 'text/html' && part.body?.data) return Buffer.from(part.body.data, 'base64').toString('utf-8');
+          if (part.parts) { const nested = getBody(part); if (nested) return nested; }
         }
       }
       return '';
     };
 
     return {
-      id: email_id,
-      threadId: detail.data.threadId,
-      from: getHeader('From'),
-      to: getHeader('To'),
-      subject: getHeader('Subject'),
-      body: getBody(detail.data.payload),
-      preview: detail.data.snippet || '',
-      date: getHeader('Date'),
-      read: !detail.data.labelIds?.includes('UNREAD'),
-      starred: detail.data.labelIds?.includes('STARRED') || false,
+      id: email_id, threadId: detail.data.threadId, from: getHeader('From'), to: getHeader('To'),
+      subject: getHeader('Subject'), body: getBody(detail.data.payload), preview: detail.data.snippet || '',
+      date: getHeader('Date'), read: !detail.data.labelIds?.includes('UNREAD'), starred: detail.data.labelIds?.includes('STARRED') || false,
     };
   },
 
@@ -1682,48 +1365,28 @@ const handlers = {
     if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REFRESH_TOKEN) {
       throw new Error('Google API not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN.');
     }
-    
+
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: 'v3', auth });
-    
     const timeMin = start_date ? new Date(start_date).toISOString() : new Date().toISOString();
     const defaultEnd = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
     const timeMax = end_date ? new Date(end_date).toISOString() : defaultEnd.toISOString();
 
-    const response = await calendar.events.list({
-      calendarId: 'primary',
-      timeMin,
-      timeMax,
-      maxResults: max_results,
-      singleEvents: true,
-      orderBy: 'startTime',
-    });
+    const response = await calendar.events.list({ calendarId: 'primary', timeMin, timeMax, maxResults: max_results, singleEvents: true, orderBy: 'startTime' });
 
     let events = response.data.items.map(event => {
-      // Extract company from [slug] prefix
       const titleMatch = event.summary?.match(/^\[([a-z0-9-]+)\]\s*/i);
       const companySlug = titleMatch ? titleMatch[1].toLowerCase() : null;
       const cleanTitle = titleMatch ? event.summary.replace(titleMatch[0], '') : event.summary;
-      
       return {
-        id: event.id,
-        title: event.summary || 'Untitled',
-        cleanTitle,
-        description: event.description,
-        start: event.start.dateTime || event.start.date,
-        end: event.end.dateTime || event.end.date,
-        location: event.location,
-        meetLink: event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri,
-        attendees: event.attendees?.map(a => a.email) || [],
-        companySlug
+        id: event.id, title: event.summary || 'Untitled', cleanTitle, description: event.description,
+        start: event.start.dateTime || event.start.date, end: event.end.dateTime || event.end.date,
+        location: event.location, meetLink: event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri,
+        attendees: event.attendees?.map(a => a.email) || [], companySlug
       };
     });
 
-    // Filter by company if specified
-    if (company_slug) {
-      events = events.filter(e => e.companySlug === company_slug.toLowerCase());
-    }
-
+    if (company_slug) events = events.filter(e => e.companySlug === company_slug.toLowerCase());
     return events;
   },
 
@@ -1731,57 +1394,29 @@ const handlers = {
     if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REFRESH_TOKEN) {
       throw new Error('Google API not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN.');
     }
-    
+
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: 'v3', auth });
-    
     const event = {
-      summary: title,
-      description: description,
-      location: location,
-      start: {
-        dateTime: new Date(start_time).toISOString(),
-        timeZone: 'America/New_York'
-      },
-      end: {
-        dateTime: new Date(end_time).toISOString(),
-        timeZone: 'America/New_York'
-      }
+      summary: title, description, location,
+      start: { dateTime: new Date(start_time).toISOString(), timeZone: 'America/New_York' },
+      end: { dateTime: new Date(end_time).toISOString(), timeZone: 'America/New_York' }
     };
-    
-    if (attendees && attendees.length > 0) {
-      event.attendees = attendees.map(email => ({ email }));
-    }
-    
-    const response = await calendar.events.insert({
-      calendarId: 'primary',
-      resource: event,
-      sendUpdates: attendees ? 'all' : 'none'
-    });
-    
+    if (attendees?.length > 0) event.attendees = attendees.map(email => ({ email }));
+
+    const response = await calendar.events.insert({ calendarId: 'primary', resource: event, sendUpdates: attendees ? 'all' : 'none' });
     return {
       success: true,
-      event: {
-        id: response.data.id,
-        title: response.data.summary,
-        start: response.data.start.dateTime,
-        end: response.data.end.dateTime,
-        link: response.data.htmlLink
-      }
+      event: { id: response.data.id, title: response.data.summary, start: response.data.start.dateTime, end: response.data.end.dateTime, link: response.data.htmlLink }
     };
   },
 
   // ============ CRM INSTANCE MANAGEMENT HANDLERS ============
   async list_crm_instances() {
-    const instances = CRM_COMPANIES.map(company => {
+    return CRM_COMPANIES.map(company => {
       const config = getCRMConfig(company);
-      return {
-        company,
-        configured: !!(config.url && config.apiKey),
-        url: config.url || 'not configured',
-      };
+      return { company, configured: !!(config.url && config.apiKey), url: config.url || 'not configured' };
     });
-    return instances;
   },
 
   async get_crm_instance_status({ company }) {
@@ -1789,7 +1424,6 @@ const handlers = {
     if (!config.url) return { company, status: 'not_configured', error: 'No CRM URL configured' };
 
     try {
-      // Health check
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
       const startTime = Date.now();
@@ -1798,31 +1432,13 @@ const handlers = {
       const latency = Date.now() - startTime;
       const healthy = healthResp.ok;
 
-      // Get user count + stats
       let users = null;
-      try {
-        const result = await callCRM(company, 'GET', '/admin/users?limit=1');
-        users = result.meta;
-      } catch (e) {
-        users = { error: e.message };
-      }
+      try { const result = await callCRM(company, 'GET', '/admin/users?limit=1'); users = result.meta; } catch (e) { users = { error: e.message }; }
 
-      // Get admin status
       let adminStatus = null;
-      try {
-        const result = await callCRM(company, 'GET', '/admin/status');
-        adminStatus = result.data;
-      } catch (e) {
-        adminStatus = { error: e.message };
-      }
+      try { const result = await callCRM(company, 'GET', '/admin/status'); adminStatus = result.data; } catch (e) { adminStatus = { error: e.message }; }
 
-      return {
-        company,
-        status: healthy ? (latency > 5000 ? 'degraded' : 'healthy') : 'unhealthy',
-        latency_ms: latency,
-        users,
-        adminStatus,
-      };
+      return { company, status: healthy ? (latency > 5000 ? 'degraded' : 'healthy') : 'unhealthy', latency_ms: latency, users, adminStatus };
     } catch (err) {
       return { company, status: 'down', error: err.message };
     }
@@ -1832,10 +1448,7 @@ const handlers = {
     const results = {};
     await Promise.all(CRM_COMPANIES.map(async (company) => {
       const config = getCRMConfig(company);
-      if (!config.url) {
-        results[company] = { status: 'not_configured' };
-        return;
-      }
+      if (!config.url) { results[company] = { status: 'not_configured' }; return; }
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
@@ -1843,13 +1456,8 @@ const handlers = {
         const resp = await fetch(`${config.url}/health`, { signal: controller.signal });
         clearTimeout(timeout);
         const latency = Date.now() - startTime;
-        results[company] = {
-          status: resp.ok ? (latency > 5000 ? 'degraded' : 'healthy') : 'unhealthy',
-          latency_ms: latency,
-        };
-      } catch (err) {
-        results[company] = { status: 'down', error: err.message };
-      }
+        results[company] = { status: resp.ok ? (latency > 5000 ? 'degraded' : 'healthy') : 'unhealthy', latency_ms: latency };
+      } catch (err) { results[company] = { status: 'down', error: err.message }; }
     }));
     return results;
   },
@@ -1860,19 +1468,13 @@ const handlers = {
     if (role) params.set('role', role);
     if (page) params.set('page', String(page));
     if (limit) params.set('limit', String(limit));
-
     const qs = params.toString();
     const result = await callCRM(company, 'GET', `/admin/users${qs ? '?' + qs : ''}`);
     return { company, users: result.data, meta: result.meta };
   },
 
   async create_crm_user({ company, email, password, displayName, role }) {
-    const result = await callCRM(company, 'POST', '/admin/users', {
-      email,
-      password,
-      displayName,
-      role: role || 'agent',
-    });
+    const result = await callCRM(company, 'POST', '/admin/users', { email, password, displayName, role: role || 'agent' });
     return { company, user: result.data, success: true };
   },
 
@@ -1887,10 +1489,7 @@ const handlers = {
   },
 
   async reset_crm_user_password({ company, user_id, new_password }) {
-    await callCRM(company, 'POST', '/admin/change-password', {
-      userId: user_id,
-      newPassword: new_password,
-    });
+    await callCRM(company, 'POST', '/admin/change-password', { userId: user_id, newPassword: new_password });
     return { company, user_id, success: true, message: 'Password reset successfully' };
   }
 };
@@ -1899,76 +1498,34 @@ const handlers = {
 app.post('/chat', async (req, res) => {
   try {
     const { message, conversation_history = [] } = req.body;
-    
-    if (!message) {
-      return res.status(400).json({ error: 'Message required' });
-    }
+    if (!message) return res.status(400).json({ error: 'Message required' });
 
-    const messages = [
-      ...conversation_history,
-      { role: 'user', content: message }
-    ];
+    const messages = [...conversation_history, { role: 'user', content: message }];
+    const claudeTools = tools.map(t => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
 
-    const claudeTools = tools.map(t => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema
-    }));
-
-    let response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4096,
-      system: SYSTEM_PROMPT,
-      tools: claudeTools,
-      messages
-    });
+    let response = await anthropic.messages.create({ model: 'claude-sonnet-4-20250514', max_tokens: 4096, system: SYSTEM_PROMPT, tools: claudeTools, messages });
 
     while (response.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: response.content });
-
       const toolResults = [];
       for (const block of response.content) {
         if (block.type === 'tool_use') {
           console.log(`Tool: ${block.name}`, block.input);
-          
           try {
             const result = await handlers[block.name](block.input);
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: block.id,
-              content: JSON.stringify(result)
-            });
+            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) });
           } catch (err) {
             console.error(`Tool error (${block.name}):`, err);
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: block.id,
-              content: JSON.stringify({ error: err.message }),
-              is_error: true
-            });
+            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify({ error: err.message }), is_error: true });
           }
         }
       }
-
       messages.push({ role: 'user', content: toolResults });
-
-      response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 4096,
-        system: SYSTEM_PROMPT,
-        tools: claudeTools,
-        messages
-      });
+      response = await anthropic.messages.create({ model: 'claude-sonnet-4-20250514', max_tokens: 4096, system: SYSTEM_PROMPT, tools: claudeTools, messages });
     }
 
     const textContent = response.content.find(b => b.type === 'text');
-    const finalResponse = textContent?.text || 'No response';
-
-    res.json({
-      response: finalResponse,
-      conversation_history: messages.concat([{ role: 'assistant', content: response.content }])
-    });
-
+    res.json({ response: textContent?.text || 'No response', conversation_history: messages.concat([{ role: 'assistant', content: response.content }]) });
   } catch (error) {
     console.error('Chat error:', error);
     res.status(500).json({ error: error.message });
@@ -1979,11 +1536,9 @@ app.post('/chat', async (req, res) => {
 app.post('/upload', async (req, res) => {
   try {
     const { slug, filename, content_base64, content_type, category, description } = req.body;
-    
     if (!slug || !filename || !content_base64 || !content_type) {
       return res.status(400).json({ error: 'Missing required fields: slug, filename, content_base64, content_type' });
     }
-    
     const result = await handlers.upload_document({ slug, filename, content_base64, content_type, category, description });
     res.json(result);
   } catch (error) {
@@ -1993,37 +1548,22 @@ app.post('/upload', async (req, res) => {
 });
 
 // ============ MCP ENDPOINTS ============
-
 app.get('/mcp', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  
   res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
-  
-  const keepAlive = setInterval(() => {
-    res.write(`data: ${JSON.stringify({ type: 'ping' })}\n\n`);
-  }, 30000);
-  
-  req.on('close', () => {
-    clearInterval(keepAlive);
-  });
+  const keepAlive = setInterval(() => { res.write(`data: ${JSON.stringify({ type: 'ping' })}\n\n`); }, 30000);
+  req.on('close', () => { clearInterval(keepAlive); });
 });
 
-app.get('/tools', (req, res) => {
-  res.json({ tools });
-});
+app.get('/tools', (req, res) => { res.json({ tools }); });
 
 app.post('/tools/:name', async (req, res) => {
   const { name } = req.params;
-  const params = req.body;
-  
-  if (!handlers[name]) {
-    return res.status(404).json({ error: `Tool not found: ${name}` });
-  }
-  
+  if (!handlers[name]) return res.status(404).json({ error: `Tool not found: ${name}` });
   try {
-    const result = await handlers[name](params);
+    const result = await handlers[name](req.body);
     res.json({ result });
   } catch (error) {
     console.error(`Error executing ${name}:`, error);
@@ -2033,31 +1573,21 @@ app.post('/tools/:name', async (req, res) => {
 
 app.post('/mcp', async (req, res) => {
   const { method, params } = req.body;
-  
   try {
     switch (method) {
       case 'initialize':
-        res.json({
-          protocolVersion: '2024-11-05',
-          serverInfo: { name: 'project-tracker', version: '1.0.0' },
-          capabilities: { tools: {} }
-        });
+        res.json({ protocolVersion: '2024-11-05', serverInfo: { name: 'project-tracker', version: '1.0.0' }, capabilities: { tools: {} } });
         break;
-        
       case 'tools/list':
         res.json({ tools });
         break;
-        
-      case 'tools/call':
+      case 'tools/call': {
         const { name, arguments: args } = params;
-        if (!handlers[name]) {
-          res.status(404).json({ error: `Tool not found: ${name}` });
-          return;
-        }
+        if (!handlers[name]) { res.status(404).json({ error: `Tool not found: ${name}` }); return; }
         const result = await handlers[name](args || {});
         res.json({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
         break;
-        
+      }
       default:
         res.status(400).json({ error: `Unknown method: ${method}` });
     }
@@ -2067,8 +1597,13 @@ app.post('/mcp', async (req, res) => {
   }
 });
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+app.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ status: 'ok', database: 'connected', timestamp: new Date().toISOString() });
+  } catch (err) {
+    res.status(503).json({ status: 'degraded', database: 'disconnected', error: err.message, timestamp: new Date().toISOString() });
+  }
 });
 
 app.get('/', (req, res) => {

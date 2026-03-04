@@ -59,9 +59,9 @@ jobs:
             --max-instances 3 \
             --port 8080 \
             --allow-unauthenticated \
+            --add-cloudsql-instances agentbox-485618:us-central1:agentbox-db-mcp \
             --set-secrets "\
-              SUPABASE_URL=mcp-supabase-url:latest,\
-              SUPABASE_KEY=mcp-supabase-key:latest,\
+              DATABASE_URL=mcp-database-url:latest,\
               ANTHROPIC_API_KEY=mcp-anthropic-api-key:latest,\
               GMAIL_USER=mcp-gmail-user:latest,\
               GMAIL_APP_PASSWORD=mcp-gmail-app-password:latest,\
@@ -76,6 +76,7 @@ jobs:
               CRM_KEY_DEV=dev-api-key:latest" \
             --update-env-vars "^;^\
               NODE_ENV=production;\
+              GCS_BUCKET=mcp-documents-agentbox;\
               CRM_INSTANCES=dtiq,packetfabric,element8,qwilt,welink,dev;\
               CRM_URL_DTIQ=${{ steps.crm_urls.outputs.CRM_URL_DTIQ }};\
               CRM_URL_PACKETFABRIC=${{ steps.crm_urls.outputs.CRM_URL_PACKETFABRIC }};\
