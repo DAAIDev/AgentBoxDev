@@ -74,7 +74,11 @@ jobs:
               CRM_KEY_QWILT=qwilt-api-key:latest,\
               CRM_KEY_WELINK=welink-api-key:latest,\
               CRM_KEY_DEV=dev-api-key:latest,\
-              GITHUB_TOKEN=mcp-github-token:latest" \
+              GITHUB_TOKEN=mcp-github-token:latest,\
+              FIREBASE_PROJECT_ID=mcp-firebase-project-id:latest,\
+              FIREBASE_CLIENT_EMAIL=mcp-firebase-client-email:latest,\
+              FIREBASE_PRIVATE_KEY=mcp-firebase-private-key:latest,\
+              GCP_SERVICE_ACCOUNT_JSON=mcp-gcp-service-account:latest" \
             --update-env-vars "^;^\
               NODE_ENV=production;\
               GCS_BUCKET=mcp-documents-agentbox;\
