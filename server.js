@@ -5,6 +5,20 @@ import { Storage } from '@google-cloud/storage';
 import nodemailer from 'nodemailer';
 import Anthropic from '@anthropic-ai/sdk';
 import { google } from 'googleapis';
+import admin from 'firebase-admin';
+
+// Firebase Admin SDK for AgentBox Dashboard user management
+if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    }),
+  });
+} else {
+  console.warn('[Firebase Admin] Missing credentials — dashboard user management endpoints disabled');
+}
 
 const app = express();
 app.use(cors());
@@ -1698,6 +1712,110 @@ app.patch('/api/feedback/:company/:id', async (req, res) => {
   }
 });
 
+// ============ DASHBOARD USER MANAGEMENT (Firebase Admin) ============
+
+function requireFirebase(res) {
+  if (!admin.apps?.length) {
+    res.status(503).json({ error: 'Firebase Admin not configured' });
+    return false;
+  }
+  return true;
+}
+
+// List all dashboard users (from Firebase Auth)
+app.get('/api/dashboard-users', async (req, res) => {
+  if (!requireFirebase(res)) return;
+  try {
+    const listResult = await admin.auth().listUsers(1000);
+    const users = listResult.users.map(u => ({
+      uid: u.uid,
+      email: u.email,
+      displayName: u.displayName || u.email?.split('@')[0] || 'User',
+      role: u.customClaims?.role || 'agent',
+      createdAt: u.metadata.creationTime,
+      lastLogin: u.metadata.lastSignInTime,
+      disabled: u.disabled,
+    }));
+    res.json({ users });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get user by email (for AuthContext role lookup)
+app.get('/api/dashboard-users/by-email/:email', async (req, res) => {
+  if (!requireFirebase(res)) return;
+  try {
+    const user = await admin.auth().getUserByEmail(req.params.email);
+    res.json({
+      uid: user.uid,
+      email: user.email,
+      displayName: user.displayName || user.email?.split('@')[0] || 'User',
+      role: user.customClaims?.role || 'agent',
+      createdAt: user.metadata.creationTime,
+      lastLogin: user.metadata.lastSignInTime,
+    });
+  } catch (err) {
+    if (err.code === 'auth/user-not-found') {
+      res.status(404).json({ error: 'User not found' });
+    } else {
+      res.status(500).json({ error: err.message });
+    }
+  }
+});
+
+// Create a dashboard user
+app.post('/api/dashboard-users', async (req, res) => {
+  if (!requireFirebase(res)) return;
+  try {
+    const { email, password, displayName, role } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+    const user = await admin.auth().createUser({
+      email,
+      password,
+      displayName: displayName || email.split('@')[0],
+    });
+    if (role) {
+      await admin.auth().setCustomUserClaims(user.uid, { role });
+    }
+    res.json({
+      uid: user.uid,
+      email: user.email,
+      displayName: user.displayName,
+      role: role || 'agent',
+      success: true,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update user role (via custom claims)
+app.patch('/api/dashboard-users/:uid/role', async (req, res) => {
+  if (!requireFirebase(res)) return;
+  try {
+    const { role } = req.body;
+    if (!['admin', 'manager', 'agent'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role. Must be admin, manager, or agent' });
+    }
+    await admin.auth().setCustomUserClaims(req.params.uid, { role });
+    res.json({ uid: req.params.uid, role, success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a dashboard user
+app.delete('/api/dashboard-users/:uid', async (req, res) => {
+  if (!requireFirebase(res)) return;
+  try {
+    await admin.auth().deleteUser(req.params.uid);
+    res.json({ uid: req.params.uid, deleted: true, success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============ CHAT ENDPOINT - THE BRAIN ============
 app.post('/chat', async (req, res) => {
   try {
@@ -1829,7 +1947,11 @@ app.get('/', (req, res) => {
       '/api/instances/:company/users/:uid/reset-password': 'Reset password (POST)',
       '/api/feedback/all': 'Aggregate feedback from all CRM instances (GET)',
       '/api/feedback/stats': 'Aggregate feedback stats (GET)',
-      '/api/feedback/:company/:id': 'Get/Update feedback item (GET/PATCH)'
+      '/api/feedback/:company/:id': 'Get/Update feedback item (GET/PATCH)',
+      '/api/dashboard-users': 'List/Create dashboard users (GET/POST)',
+      '/api/dashboard-users/by-email/:email': 'Get user by email (GET)',
+      '/api/dashboard-users/:uid/role': 'Update user role (PATCH)',
+      '/api/dashboard-users/:uid': 'Delete user (DELETE)'
     }
   });
 });
