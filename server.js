@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import pg from 'pg';
@@ -58,6 +59,72 @@ function getGoogleAuth() {
     refresh_token: process.env.GOOGLE_REFRESH_TOKEN
   });
   return oauth2Client;
+}
+
+// ============ GCP MONITORING AUTH ============
+const GCP_PROJECT_ID = 'agentbox-485618';
+const GCP_REGION = 'us-central1';
+
+// Cloud Run service name mapping
+const TENANT_SERVICE_MAP = {
+  dtiq: 'crm-backend-dtiq',
+  packetfabric: 'crm-backend-packetfabric',
+  element8: 'crm-backend-element8',
+  qwilt: 'crm-backend-qwilt',
+  welink: 'crm-backend-welink',
+  dev: 'crm-backend-dev',
+};
+
+let gcpAuth = null;
+
+function getGcpAuth() {
+  if (gcpAuth) return gcpAuth;
+  const encoded = process.env.GCP_SERVICE_ACCOUNT_JSON;
+  if (!encoded) return null;
+  try {
+    const credentials = JSON.parse(Buffer.from(encoded, 'base64').toString('utf-8'));
+    gcpAuth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: [
+        'https://www.googleapis.com/auth/cloud-platform',
+        'https://www.googleapis.com/auth/logging.read',
+      ],
+    });
+    return gcpAuth;
+  } catch (err) {
+    console.error('Failed to initialize GCP auth:', err.message);
+    return null;
+  }
+}
+
+function requireGcpAuth() {
+  const auth = getGcpAuth();
+  if (!auth) throw new Error('GCP credentials not configured. Set GCP_SERVICE_ACCOUNT_JSON env var.');
+  return auth;
+}
+
+function getServiceName(tenant) {
+  const service = TENANT_SERVICE_MAP[tenant];
+  if (!service) throw new Error(`Unknown tenant: ${tenant}. Valid: ${Object.keys(TENANT_SERVICE_MAP).join(', ')}`);
+  return service;
+}
+
+function extractLogMessage(entry) {
+  let message = entry.textPayload || '';
+  if (!message && entry.jsonPayload) {
+    message = entry.jsonPayload.message
+      || entry.jsonPayload.fields?.message?.stringValue
+      || entry.jsonPayload.msg
+      || JSON.stringify(entry.jsonPayload);
+  }
+  if (!message && entry.httpRequest) {
+    const r = entry.httpRequest;
+    message = `${r.requestMethod || 'GET'} ${r.requestUrl || ''} ${r.status || ''}`;
+  }
+  if (!message && entry.protoPayload) {
+    message = entry.protoPayload.methodName || JSON.stringify(entry.protoPayload);
+  }
+  return message || '(no message)';
 }
 
 // ============ CRM INSTANCE CONFIG ============
@@ -797,6 +864,54 @@ const tools = [
       required: []
     }
   },
+  // ============ GCP CLOUD RUN MONITORING TOOLS ============
+  {
+    name: "get_cloudrun_service_info",
+    description: "Get Cloud Run service configuration for a tenant (revision, image, CPU/memory, scaling, last deploy time)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Tenant slug" }
+      },
+      required: ["tenant"]
+    }
+  },
+  {
+    name: "get_cloudrun_metrics",
+    description: "Get aggregate metrics for a tenant's Cloud Run service (request count, latency, error rate, CPU, memory)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Tenant slug" },
+        period: { type: "string", enum: ["1h", "6h", "24h", "7d", "30d"], description: "Time period (default: 24h)" }
+      },
+      required: ["tenant"]
+    }
+  },
+  {
+    name: "get_cloudrun_metrics_timeseries",
+    description: "Get time-series data points for charting a specific metric",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Tenant slug" },
+        metric: { type: "string", enum: ["request_count", "request_latencies", "instance_count", "cpu_utilization", "memory_utilization", "error_count"], description: "Metric to fetch" },
+        period: { type: "string", enum: ["1h", "6h", "24h", "7d", "30d"], description: "Time period (default: 24h)" }
+      },
+      required: ["tenant", "metric"]
+    }
+  },
+  {
+    name: "get_all_deployments_metrics",
+    description: "Get summary metrics for ALL tenants in one call (for the deployments list page)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        period: { type: "string", enum: ["1h", "6h", "24h", "7d", "30d"], description: "Time period (default: 1h)" }
+      },
+      required: []
+    }
+  },
   {
     name: "github_list_commits",
     description: "List recent commits for a specific repo, or across all org repos if no repo specified",
@@ -833,6 +948,57 @@ const tools = [
         days: { type: "number", description: "Look-back window in days (default: 7, max: 30)" }
       },
       required: []
+    }
+  },
+  {
+    name: "get_cloudrun_revisions",
+    description: "Get recent deployment revisions for a tenant's Cloud Run service",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Tenant slug" },
+        limit: { type: "number", description: "Max revisions to return (default: 10)" }
+      },
+      required: ["tenant"]
+    }
+  },
+  {
+    name: "get_deployment_logs",
+    description: "Get real log entries from Cloud Logging for a tenant's Cloud Run service",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Tenant slug" },
+        severity: { type: "string", enum: ["DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL"], description: "Minimum severity filter" },
+        limit: { type: "number", description: "Max entries to return (default: 50)" },
+        hours_back: { type: "number", description: "How many hours back to search (default: 1)" },
+        search: { type: "string", description: "Text search within log messages" }
+      },
+      required: ["tenant"]
+    }
+  },
+  {
+    name: "get_deployment_log_summary",
+    description: "Get aggregated log counts by severity for a tenant",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Tenant slug" },
+        hours_back: { type: "number", description: "How many hours to summarize (default: 24)" }
+      },
+      required: ["tenant"]
+    }
+  },
+  {
+    name: "get_firebase_users",
+    description: "Get Firebase Auth user stats for a tenant",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", enum: ["dtiq", "packetfabric", "element8", "qwilt", "welink", "dev"], description: "Tenant slug" },
+        include_list: { type: "boolean", description: "Include list of individual users (default: false)" }
+      },
+      required: ["tenant"]
     }
   }
 ];
@@ -1834,6 +2000,312 @@ const handlers = {
       total_open_prs: totalOpenPRs,
       active_repos: activeRepos,
       top_contributors: topContributors,
+    };
+  },
+
+  // ============ GCP CLOUD RUN MONITORING HANDLERS ============
+
+  async get_cloudrun_service_info({ tenant }) {
+    const auth = requireGcpAuth();
+    const serviceName = getServiceName(tenant);
+    const run = google.run({ version: 'v2', auth });
+    const name = `projects/${GCP_PROJECT_ID}/locations/${GCP_REGION}/services/${serviceName}`;
+
+    const { data } = await run.projects.locations.services.get({ name });
+    const template = data.template || {};
+    const container = template.containers?.[0] || {};
+    const resources = container.resources?.limits || {};
+    const scaling = template.scaling || {};
+
+    return {
+      service_name: serviceName,
+      url: data.uri,
+      latest_revision: data.latestReadyRevision?.split('/').pop() || null,
+      image: container.image || null,
+      cpu_limit: resources.cpu || null,
+      memory_limit: resources.memory || null,
+      min_instances: scaling.minInstanceCount || 0,
+      max_instances: scaling.maxInstanceCount || null,
+      last_deploy_time: data.updateTime || null,
+      ingress: data.ingress || null,
+    };
+  },
+
+  async get_cloudrun_metrics({ tenant, period }) {
+    const auth = requireGcpAuth();
+    const serviceName = getServiceName(tenant);
+    const monitoring = google.monitoring({ version: 'v3', auth });
+
+    const periodMap = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000 };
+    const seconds = periodMap[period] || periodMap['24h'];
+    const now = new Date();
+    const start = new Date(now.getTime() - seconds * 1000);
+
+    const interval = {
+      startTime: start.toISOString(),
+      endTime: now.toISOString(),
+    };
+    const filter = (metric) =>
+      `resource.type="cloud_run_revision" AND resource.labels.service_name="${serviceName}" AND metric.type="${metric}"`;
+
+    async function fetchMetric(metricType, alignerOverride) {
+      try {
+        const { data } = await monitoring.projects.timeSeries.list({
+          name: `projects/${GCP_PROJECT_ID}`,
+          filter: filter(metricType),
+          'interval.startTime': interval.startTime,
+          'interval.endTime': interval.endTime,
+          'aggregation.alignmentPeriod': `${seconds}s`,
+          'aggregation.perSeriesAligner': alignerOverride || 'ALIGN_SUM',
+          'aggregation.crossSeriesReducer': 'REDUCE_SUM',
+        });
+        return data.timeSeries || [];
+      } catch {
+        return [];
+      }
+    }
+
+    const [requestSeries, latencySeries, instanceSeries] = await Promise.all([
+      fetchMetric('run.googleapis.com/request_count', 'ALIGN_SUM'),
+      fetchMetric('run.googleapis.com/request_latencies', 'ALIGN_PERCENTILE_99'),
+      fetchMetric('run.googleapis.com/container/instance_count', 'ALIGN_MEAN'),
+    ]);
+
+    function sumPoints(series) {
+      return series.reduce((sum, ts) => {
+        return sum + (ts.points || []).reduce((s, p) => s + Number(p.value?.int64Value || p.value?.doubleValue || 0), 0);
+      }, 0);
+    }
+
+    function avgPoints(series) {
+      let total = 0, count = 0;
+      for (const ts of series) {
+        for (const p of ts.points || []) {
+          total += Number(p.value?.doubleValue || p.value?.int64Value || 0);
+          count++;
+        }
+      }
+      return count > 0 ? total / count : 0;
+    }
+
+    const requestCount = sumPoints(requestSeries);
+    const avgLatencyUs = avgPoints(latencySeries);
+    const activeInstances = Math.round(avgPoints(instanceSeries));
+
+    return {
+      request_count: requestCount,
+      avg_latency_ms: Math.round(avgLatencyUs / 1000 * 100) / 100,
+      active_instances: activeInstances,
+      period: period || '24h',
+    };
+  },
+
+  async get_cloudrun_metrics_timeseries({ tenant, metric, period }) {
+    const auth = requireGcpAuth();
+    const serviceName = getServiceName(tenant);
+    const monitoring = google.monitoring({ version: 'v3', auth });
+
+    const periodMap = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000 };
+    const seconds = periodMap[period] || periodMap['24h'];
+    const now = new Date();
+    const start = new Date(now.getTime() - seconds * 1000);
+
+    // Finer alignment for charts
+    const alignmentMap = { '1h': 60, '6h': 300, '24h': 900, '7d': 3600, '30d': 14400 };
+    const alignSec = alignmentMap[period] || alignmentMap['24h'];
+
+    const metricMap = {
+      request_count: { type: 'run.googleapis.com/request_count', aligner: 'ALIGN_SUM' },
+      request_latencies: { type: 'run.googleapis.com/request_latencies', aligner: 'ALIGN_PERCENTILE_50' },
+      instance_count: { type: 'run.googleapis.com/container/instance_count', aligner: 'ALIGN_MEAN' },
+      cpu_utilization: { type: 'run.googleapis.com/container/cpu/utilizations', aligner: 'ALIGN_PERCENTILE_50' },
+      memory_utilization: { type: 'run.googleapis.com/container/memory/utilizations', aligner: 'ALIGN_PERCENTILE_50' },
+      error_count: { type: 'run.googleapis.com/request_count', aligner: 'ALIGN_SUM' },
+    };
+
+    const m = metricMap[metric];
+    if (!m) throw new Error(`Unknown metric: ${metric}. Valid: ${Object.keys(metricMap).join(', ')}`);
+
+    let extraFilter = '';
+    if (metric === 'error_count') {
+      extraFilter = ' AND metric.labels.response_code_class!="2xx"';
+    }
+
+    const { data } = await monitoring.projects.timeSeries.list({
+      name: `projects/${GCP_PROJECT_ID}`,
+      filter: `resource.type="cloud_run_revision" AND resource.labels.service_name="${serviceName}" AND metric.type="${m.type}"${extraFilter}`,
+      'interval.startTime': start.toISOString(),
+      'interval.endTime': now.toISOString(),
+      'aggregation.alignmentPeriod': `${alignSec}s`,
+      'aggregation.perSeriesAligner': m.aligner,
+      'aggregation.crossSeriesReducer': 'REDUCE_SUM',
+    });
+
+    const isLatency = metric === 'request_latencies';
+    const points = [];
+    for (const ts of data.timeSeries || []) {
+      for (const p of ts.points || []) {
+        const raw = Number(p.value?.doubleValue || p.value?.int64Value || 0);
+        points.push({
+          timestamp: p.interval?.endTime,
+          value: isLatency ? Math.round(raw / 1000 * 100) / 100 : raw,
+        });
+      }
+    }
+
+    points.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    return { metric, period: period || '24h', data: points };
+  },
+
+  async get_all_deployments_metrics({ period }) {
+    const auth = getGcpAuth();
+    if (!auth) {
+      // Graceful fallback — return empty metrics for each tenant
+      return Object.keys(TENANT_SERVICE_MAP).map(tenant => ({
+        tenant,
+        service_name: TENANT_SERVICE_MAP[tenant],
+        request_count: null,
+        avg_latency_ms: null,
+        active_instances: null,
+        error: 'GCP credentials not configured',
+      }));
+    }
+
+    const results = await Promise.allSettled(
+      Object.keys(TENANT_SERVICE_MAP).map(async (tenant) => {
+        const metrics = await handlers.get_cloudrun_metrics({ tenant, period: period || '1h' });
+        return { tenant, service_name: TENANT_SERVICE_MAP[tenant], ...metrics };
+      })
+    );
+
+    return results.map((r, i) => {
+      const tenant = Object.keys(TENANT_SERVICE_MAP)[i];
+      if (r.status === 'fulfilled') return r.value;
+      return { tenant, service_name: TENANT_SERVICE_MAP[tenant], error: r.reason?.message };
+    });
+  },
+
+  async get_cloudrun_revisions({ tenant, limit }) {
+    const auth = requireGcpAuth();
+    const serviceName = getServiceName(tenant);
+    const run = google.run({ version: 'v2', auth });
+    const parent = `projects/${GCP_PROJECT_ID}/locations/${GCP_REGION}/services/${serviceName}`;
+
+    const { data } = await run.projects.locations.services.revisions.list({
+      parent,
+      pageSize: limit || 10,
+    });
+
+    return (data.revisions || []).map((rev) => {
+      const container = rev.containers?.[0] || {};
+      return {
+        name: rev.name?.split('/').pop(),
+        create_time: rev.createTime,
+        image: container.image || null,
+        scaling: rev.scaling || {},
+        conditions: (rev.conditions || []).map(c => ({ type: c.type, state: c.state })),
+      };
+    });
+  },
+
+  async get_deployment_logs({ tenant, severity, limit: maxEntries, hours_back, search }) {
+    const auth = requireGcpAuth();
+    const serviceName = getServiceName(tenant);
+    const logging = google.logging({ version: 'v2', auth });
+
+    const hours = hours_back || 1;
+    const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+
+    let filter = `resource.type="cloud_run_revision" AND resource.labels.service_name="${serviceName}" AND timestamp>="${since}"`;
+    const validSeverities = ['DEFAULT', 'DEBUG', 'INFO', 'NOTICE', 'WARNING', 'ERROR', 'CRITICAL', 'ALERT', 'EMERGENCY'];
+    if (severity && validSeverities.includes(severity)) filter += ` AND severity="${severity}"`;
+    if (search) {
+      const sanitized = search.replace(/["\\]/g, '');
+      if (sanitized) filter += ` AND (textPayload=~"${sanitized}" OR jsonPayload.message=~"${sanitized}" OR httpRequest.requestUrl=~"${sanitized}")`;
+    }
+
+    const { data } = await logging.entries.list({
+      requestBody: {
+        resourceNames: [`projects/${GCP_PROJECT_ID}`],
+        filter,
+        orderBy: 'timestamp desc',
+        pageSize: maxEntries || 50,
+      },
+    });
+
+    return (data.entries || []).map((entry) => ({
+      timestamp: entry.timestamp,
+      severity: entry.severity || 'DEFAULT',
+      message: extractLogMessage(entry),
+      log_name: entry.logName?.split('/').pop(),
+      trace_id: entry.trace || null,
+      json_payload: entry.jsonPayload || entry.httpRequest || entry.protoPayload || null,
+    }));
+  },
+
+  async get_deployment_log_summary({ tenant, hours_back }) {
+    const auth = requireGcpAuth();
+    const serviceName = getServiceName(tenant);
+    const logging = google.logging({ version: 'v2', auth });
+
+    const hours = hours_back || 24;
+    const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    const filter = `resource.type="cloud_run_revision" AND resource.labels.service_name="${serviceName}" AND timestamp>="${since}"`;
+
+    // Fetch severity counts + recent errors in parallel
+    const severities = ['ERROR', 'WARNING', 'INFO', 'DEBUG', 'NOTICE', 'CRITICAL'];
+    const counts = {};
+
+    const countPromises = severities.map(async (sev) => {
+      try {
+        const { data } = await logging.entries.list({
+          requestBody: {
+            resourceNames: [`projects/${GCP_PROJECT_ID}`],
+            filter: `${filter} AND severity="${sev}"`,
+            pageSize: 1,
+          },
+        });
+        counts[sev] = data.entries?.length ? 1 : 0;
+      } catch {
+        counts[sev] = 0;
+      }
+    });
+
+    const errorPromise = logging.entries.list({
+      requestBody: {
+        resourceNames: [`projects/${GCP_PROJECT_ID}`],
+        filter: `${filter} AND severity>="ERROR"`,
+        orderBy: 'timestamp desc',
+        pageSize: 5,
+      },
+    }).catch(() => ({ data: { entries: [] } }));
+
+    await Promise.all([...countPromises, errorPromise]);
+    const { data: errorData } = await errorPromise;
+
+    const recentErrors = (errorData.entries || []).map((e) => ({
+      timestamp: e.timestamp,
+      severity: e.severity,
+      message: extractLogMessage(e),
+    }));
+
+    return {
+      hours_back: hours,
+      by_severity: counts,
+      recent_errors: recentErrors,
+    };
+  },
+
+  async get_firebase_users({ tenant, include_list }) {
+    // Firebase user stats require per-tenant Firebase admin credentials
+    // This is a placeholder that returns a graceful fallback
+    // TODO: implement when per-tenant Firebase service accounts are available
+    return {
+      tenant,
+      error: 'Firebase user stats not yet configured for this tenant',
+      total_users: null,
+      active_last_24h: null,
+      active_last_7d: null,
     };
   }
 };
