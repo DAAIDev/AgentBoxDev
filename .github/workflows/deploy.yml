@@ -73,7 +73,8 @@ jobs:
               CRM_KEY_ELEMENT8=element8-api-key:latest,\
               CRM_KEY_QWILT=qwilt-api-key:latest,\
               CRM_KEY_WELINK=welink-api-key:latest,\
-              CRM_KEY_DEV=dev-api-key:latest" \
+              CRM_KEY_DEV=dev-api-key:latest,\
+              GITHUB_TOKEN=mcp-github-token:latest" \
             --update-env-vars "^;^\
               NODE_ENV=production;\
               GCS_BUCKET=mcp-documents-agentbox;\
