@@ -119,7 +119,25 @@ CREATE TABLE IF NOT EXISTS deployment_components (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Admin Requests (Google Workspace & Website edit requests)
+CREATE TABLE IF NOT EXISTS admin_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  type TEXT NOT NULL CHECK (type IN ('workspace', 'website')),
+  category TEXT NOT NULL,
+  subject TEXT,
+  description TEXT NOT NULL,
+  priority TEXT DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high')),
+  page_url TEXT,
+  reference_url TEXT,
+  submitted_by TEXT,
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'resolved')),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Indexes
+CREATE INDEX IF NOT EXISTS idx_admin_requests_type ON admin_requests(type);
+CREATE INDEX IF NOT EXISTS idx_admin_requests_status ON admin_requests(status);
+CREATE INDEX IF NOT EXISTS idx_admin_requests_created ON admin_requests(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_milestones_company ON milestones(company_id);
 CREATE INDEX IF NOT EXISTS idx_activity_company ON activity(company_id);
 CREATE INDEX IF NOT EXISTS idx_activity_created ON activity(created_at DESC);
