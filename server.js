@@ -1000,6 +1000,177 @@ const tools = [
       },
       required: ["tenant"]
     }
+  },
+
+  // ============ BUILD AGENTS (Layer 1) ============
+  {
+    name: "list_build_runs",
+    description: "List build runs, optionally filter by status or repo",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["pending", "running", "success", "failed", "cancelled"], description: "Filter by status" },
+        repo: { type: "string", description: "Filter by repo name" },
+        limit: { type: "number", description: "Max results (default 20)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_build_run",
+    description: "Get full details for a build run including all tasks",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Build run UUID" }
+      },
+      required: ["id"]
+    }
+  },
+  {
+    name: "create_build_run",
+    description: "Submit a new build spec for parallel agent execution",
+    inputSchema: {
+      type: "object",
+      properties: {
+        spec_title: { type: "string", description: "Short title for the build" },
+        spec_body: { type: "string", description: "Full spec/requirements for agents to implement" },
+        repo: { type: "string", description: "GitHub repo (e.g. CRMBackend, AgentBoxDashboard)" },
+        branch: { type: "string", description: "Base branch (default: main)" }
+      },
+      required: ["spec_title", "spec_body", "repo"]
+    }
+  },
+  {
+    name: "cancel_build_run",
+    description: "Cancel a running or pending build run",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Build run UUID" }
+      },
+      required: ["id"]
+    }
+  },
+  {
+    name: "get_build_task_log",
+    description: "Get the output log for a specific build task",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Build task UUID" }
+      },
+      required: ["task_id"]
+    }
+  },
+
+  // ============ MONITORING (Layer 2) ============
+  {
+    name: "list_error_events",
+    description: "List error events detected from Cloud Logging, optionally filter by service or severity",
+    inputSchema: {
+      type: "object",
+      properties: {
+        service: { type: "string", description: "Filter by service name (e.g. crm-backend-dtiq)" },
+        severity: { type: "string", enum: ["WARNING", "ERROR", "CRITICAL"], description: "Filter by severity" },
+        acknowledged: { type: "boolean", description: "Filter by acknowledged status" },
+        limit: { type: "number", description: "Max results (default 50)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_error_event",
+    description: "Get full details for an error event including triage information",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Error event UUID" }
+      },
+      required: ["id"]
+    }
+  },
+  {
+    name: "list_error_triage",
+    description: "List triaged errors, optionally filter by category or auto-fixable status",
+    inputSchema: {
+      type: "object",
+      properties: {
+        category: { type: "string", enum: ["bug", "config", "transient", "dependency", "infra", "unknown"], description: "Filter by triage category" },
+        auto_fixable: { type: "boolean", description: "Filter by auto-fixable status" },
+        limit: { type: "number", description: "Max results (default 50)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_monitoring_stats",
+    description: "Get aggregate monitoring stats: errors in last 24h, by service, by severity",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "acknowledge_error",
+    description: "Mark an error event as acknowledged",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Error event UUID" }
+      },
+      required: ["id"]
+    }
+  },
+
+  // ============ AUTO-FIX (Layer 3) ============
+  {
+    name: "list_autofix_runs",
+    description: "List auto-fix runs, optionally filter by status or repo",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["pending", "running", "testing", "success", "failed", "cancelled"], description: "Filter by status" },
+        repo: { type: "string", description: "Filter by repo name" },
+        limit: { type: "number", description: "Max results (default 20)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_autofix_run",
+    description: "Get full details for an auto-fix run",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Autofix run UUID" }
+      },
+      required: ["id"]
+    }
+  },
+  {
+    name: "trigger_autofix",
+    description: "Manually trigger an auto-fix for a triaged error",
+    inputSchema: {
+      type: "object",
+      properties: {
+        error_triage_id: { type: "string", description: "Error triage UUID to fix" },
+        repo: { type: "string", description: "Target repo for the fix" }
+      },
+      required: ["error_triage_id", "repo"]
+    }
+  },
+  {
+    name: "cancel_autofix",
+    description: "Cancel a running or pending auto-fix run",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Autofix run UUID" }
+      },
+      required: ["id"]
+    }
   }
 ];
 
@@ -2307,6 +2478,170 @@ const handlers = {
       active_last_24h: null,
       active_last_7d: null,
     };
+  },
+
+  // ============ BUILD AGENTS (Layer 1) ============
+
+  async list_build_runs({ status, repo, limit }) {
+    const max = Math.min(limit || 20, 100);
+    let sql = 'SELECT * FROM build_runs WHERE 1=1';
+    const params = [];
+    let idx = 1;
+    if (status) { sql += ` AND status = $${idx++}`; params.push(status); }
+    if (repo) { sql += ` AND repo = $${idx++}`; params.push(repo); }
+    sql += ` ORDER BY created_at DESC LIMIT $${idx}`;
+    params.push(max);
+    return await query(sql, params);
+  },
+
+  async get_build_run({ id }) {
+    const run = await queryOne('SELECT * FROM build_runs WHERE id = $1', [id]);
+    if (!run) throw new Error(`Build run not found: ${id}`);
+    const tasks = await query('SELECT * FROM build_tasks WHERE build_run_id = $1 ORDER BY created_at', [id]);
+    return { ...run, tasks };
+  },
+
+  async create_build_run({ spec_title, spec_body, repo, branch }) {
+    const rows = await query(
+      `INSERT INTO build_runs (spec_title, spec_body, repo, branch) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [spec_title, spec_body, repo, branch || 'main']
+    );
+    return { success: true, build_run: rows[0] };
+  },
+
+  async cancel_build_run({ id }) {
+    const rows = await query(
+      `UPDATE build_runs SET status = 'cancelled', updated_at = NOW() WHERE id = $1 AND status IN ('pending', 'running') RETURNING *`,
+      [id]
+    );
+    if (!rows.length) throw new Error(`Build run not found or not cancellable: ${id}`);
+    // Also cancel any pending/running tasks
+    await query(
+      `UPDATE build_tasks SET status = 'cancelled', updated_at = NOW() WHERE build_run_id = $1 AND status IN ('pending', 'running')`,
+      [id]
+    );
+    return { success: true, build_run: rows[0] };
+  },
+
+  async get_build_task_log({ task_id }) {
+    const task = await queryOne('SELECT id, title, status, output_log, files_changed, error_message, started_at, completed_at FROM build_tasks WHERE id = $1', [task_id]);
+    if (!task) throw new Error(`Build task not found: ${task_id}`);
+    return task;
+  },
+
+  // ============ MONITORING (Layer 2) ============
+
+  async list_error_events({ service, severity, acknowledged, limit }) {
+    const max = Math.min(limit || 50, 200);
+    let sql = 'SELECT * FROM error_events WHERE 1=1';
+    const params = [];
+    let idx = 1;
+    if (service) { sql += ` AND service = $${idx++}`; params.push(service); }
+    if (severity) { sql += ` AND severity = $${idx++}`; params.push(severity); }
+    if (acknowledged !== undefined) { sql += ` AND acknowledged = $${idx++}`; params.push(acknowledged); }
+    sql += ` ORDER BY last_seen_at DESC LIMIT $${idx}`;
+    params.push(max);
+    return await query(sql, params);
+  },
+
+  async get_error_event({ id }) {
+    const event = await queryOne('SELECT * FROM error_events WHERE id = $1', [id]);
+    if (!event) throw new Error(`Error event not found: ${id}`);
+    const triage = await query('SELECT * FROM error_triage WHERE error_event_id = $1 ORDER BY created_at DESC', [id]);
+    return { ...event, triage };
+  },
+
+  async list_error_triage({ category, auto_fixable, limit }) {
+    const max = Math.min(limit || 50, 200);
+    let sql = `SELECT et.*, ee.service, ee.severity, ee.message as error_message, ee.occurrence_count
+               FROM error_triage et JOIN error_events ee ON et.error_event_id = ee.id WHERE 1=1`;
+    const params = [];
+    let idx = 1;
+    if (category) { sql += ` AND et.category = $${idx++}`; params.push(category); }
+    if (auto_fixable !== undefined) { sql += ` AND et.auto_fixable = $${idx++}`; params.push(auto_fixable); }
+    sql += ` ORDER BY et.created_at DESC LIMIT $${idx}`;
+    params.push(max);
+    return await query(sql, params);
+  },
+
+  async get_monitoring_stats() {
+    const [totalErrors, byService, bySeverity, unacked, autoFixable] = await Promise.all([
+      queryOne(`SELECT COUNT(*) as total FROM error_events WHERE last_seen_at > NOW() - INTERVAL '24 hours'`),
+      query(`SELECT service, COUNT(*) as count FROM error_events WHERE last_seen_at > NOW() - INTERVAL '24 hours' GROUP BY service ORDER BY count DESC`),
+      query(`SELECT severity, COUNT(*) as count FROM error_events WHERE last_seen_at > NOW() - INTERVAL '24 hours' GROUP BY severity`),
+      queryOne(`SELECT COUNT(*) as total FROM error_events WHERE acknowledged = FALSE`),
+      queryOne(`SELECT COUNT(*) as total FROM error_triage WHERE auto_fixable = TRUE AND autofix_run_id IS NULL`)
+    ]);
+    return {
+      last_24h: {
+        total_errors: parseInt(totalErrors.total),
+        by_service: byService,
+        by_severity: bySeverity,
+      },
+      unacknowledged: parseInt(unacked.total),
+      pending_autofixes: parseInt(autoFixable.total),
+    };
+  },
+
+  async acknowledge_error({ id }) {
+    const rows = await query(
+      `UPDATE error_events SET acknowledged = TRUE WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    if (!rows.length) throw new Error(`Error event not found: ${id}`);
+    return { success: true, error_event: rows[0] };
+  },
+
+  // ============ AUTO-FIX (Layer 3) ============
+
+  async list_autofix_runs({ status, repo, limit }) {
+    const max = Math.min(limit || 20, 100);
+    let sql = `SELECT ar.*, et.category, et.root_cause, ee.service, ee.message as error_message
+               FROM autofix_runs ar
+               LEFT JOIN error_triage et ON ar.error_triage_id = et.id
+               LEFT JOIN error_events ee ON et.error_event_id = ee.id
+               WHERE 1=1`;
+    const params = [];
+    let idx = 1;
+    if (status) { sql += ` AND ar.status = $${idx++}`; params.push(status); }
+    if (repo) { sql += ` AND ar.repo = $${idx++}`; params.push(repo); }
+    sql += ` ORDER BY ar.created_at DESC LIMIT $${idx}`;
+    params.push(max);
+    return await query(sql, params);
+  },
+
+  async get_autofix_run({ id }) {
+    const run = await queryOne(
+      `SELECT ar.*, et.category, et.root_cause, et.suggested_fix, ee.service, ee.severity, ee.message as error_message
+       FROM autofix_runs ar
+       LEFT JOIN error_triage et ON ar.error_triage_id = et.id
+       LEFT JOIN error_events ee ON et.error_event_id = ee.id
+       WHERE ar.id = $1`,
+      [id]
+    );
+    if (!run) throw new Error(`Autofix run not found: ${id}`);
+    return run;
+  },
+
+  async trigger_autofix({ error_triage_id, repo }) {
+    const triage = await queryOne('SELECT * FROM error_triage WHERE id = $1', [error_triage_id]);
+    if (!triage) throw new Error(`Error triage not found: ${error_triage_id}`);
+    const rows = await query(
+      `INSERT INTO autofix_runs (error_triage_id, repo, status) VALUES ($1, $2, 'pending') RETURNING *`,
+      [error_triage_id, repo]
+    );
+    // Link autofix run back to triage
+    await query('UPDATE error_triage SET autofix_run_id = $1 WHERE id = $2', [rows[0].id, error_triage_id]);
+    return { success: true, autofix_run: rows[0] };
+  },
+
+  async cancel_autofix({ id }) {
+    const rows = await query(
+      `UPDATE autofix_runs SET status = 'cancelled', updated_at = NOW() WHERE id = $1 AND status IN ('pending', 'running', 'testing') RETURNING *`,
+      [id]
+    );
+    if (!rows.length) throw new Error(`Autofix run not found or not cancellable: ${id}`);
+    return { success: true, autofix_run: rows[0] };
   }
 };
 
@@ -2667,6 +3002,118 @@ app.delete('/api/dashboard-users/:uid', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ============ BUILD AGENTS REST API ============
+
+app.get('/api/build-runs', async (req, res) => {
+  try {
+    const result = await handlers.list_build_runs({ status: req.query.status, repo: req.query.repo, limit: parseInt(req.query.limit) || 20 });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/build-runs/:id', async (req, res) => {
+  try {
+    const result = await handlers.get_build_run({ id: req.params.id });
+    res.json(result);
+  } catch (err) { res.status(err.message.includes('not found') ? 404 : 500).json({ error: err.message }); }
+});
+
+app.post('/api/build-runs', async (req, res) => {
+  try {
+    const result = await handlers.create_build_run(req.body);
+    res.status(201).json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/build-runs/:id/cancel', async (req, res) => {
+  try {
+    const result = await handlers.cancel_build_run({ id: req.params.id });
+    res.json(result);
+  } catch (err) { res.status(err.message.includes('not found') ? 404 : 500).json({ error: err.message }); }
+});
+
+app.get('/api/build-tasks/:id/log', async (req, res) => {
+  try {
+    const result = await handlers.get_build_task_log({ task_id: req.params.id });
+    res.json(result);
+  } catch (err) { res.status(err.message.includes('not found') ? 404 : 500).json({ error: err.message }); }
+});
+
+// ============ MONITORING REST API ============
+
+app.get('/api/error-events', async (req, res) => {
+  try {
+    const result = await handlers.list_error_events({
+      service: req.query.service, severity: req.query.severity,
+      acknowledged: req.query.acknowledged !== undefined ? req.query.acknowledged === 'true' : undefined,
+      limit: parseInt(req.query.limit) || 50
+    });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/error-events/:id', async (req, res) => {
+  try {
+    const result = await handlers.get_error_event({ id: req.params.id });
+    res.json(result);
+  } catch (err) { res.status(err.message.includes('not found') ? 404 : 500).json({ error: err.message }); }
+});
+
+app.post('/api/error-events/:id/acknowledge', async (req, res) => {
+  try {
+    const result = await handlers.acknowledge_error({ id: req.params.id });
+    res.json(result);
+  } catch (err) { res.status(err.message.includes('not found') ? 404 : 500).json({ error: err.message }); }
+});
+
+app.get('/api/error-triage', async (req, res) => {
+  try {
+    const result = await handlers.list_error_triage({
+      category: req.query.category,
+      auto_fixable: req.query.auto_fixable !== undefined ? req.query.auto_fixable === 'true' : undefined,
+      limit: parseInt(req.query.limit) || 50
+    });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/monitoring/stats', async (req, res) => {
+  try {
+    const result = await handlers.get_monitoring_stats();
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============ AUTO-FIX REST API ============
+
+app.get('/api/autofix-runs', async (req, res) => {
+  try {
+    const result = await handlers.list_autofix_runs({ status: req.query.status, repo: req.query.repo, limit: parseInt(req.query.limit) || 20 });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/autofix-runs/:id', async (req, res) => {
+  try {
+    const result = await handlers.get_autofix_run({ id: req.params.id });
+    res.json(result);
+  } catch (err) { res.status(err.message.includes('not found') ? 404 : 500).json({ error: err.message }); }
+});
+
+app.post('/api/autofix-runs', async (req, res) => {
+  try {
+    const result = await handlers.trigger_autofix(req.body);
+    res.status(201).json(result);
+  } catch (err) { res.status(err.message.includes('not found') ? 404 : 500).json({ error: err.message }); }
+});
+
+app.post('/api/autofix-runs/:id/cancel', async (req, res) => {
+  try {
+    const result = await handlers.cancel_autofix({ id: req.params.id });
+    res.json(result);
+  } catch (err) { res.status(err.message.includes('not found') ? 404 : 500).json({ error: err.message }); }
 });
 
 // ============ CHAT ENDPOINT - THE BRAIN ============
