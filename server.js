@@ -105,6 +105,45 @@ async function callCRM(company, method, path, body) {
   }
 }
 
+// ============ GITHUB API HELPER ============
+const GITHUB_ORG = process.env.GITHUB_ORG || 'DAAITeam';
+
+async function callGitHub(path, params = {}) {
+  if (!process.env.GITHUB_TOKEN) {
+    throw new Error('GITHUB_TOKEN not configured');
+  }
+
+  const url = new URL(`https://api.github.com${path}`);
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const resp = await fetch(url.toString(), {
+      headers: {
+        'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.message || `GitHub API returned HTTP ${resp.status}`);
+    }
+    return resp.json();
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') throw new Error('GitHub API request timed out');
+    throw err;
+  }
+}
+
 // ============ DB HELPER ============
 async function query(text, params) {
   const { rows } = await pool.query(text, params);
@@ -171,6 +210,12 @@ CRM INSTANCE MANAGEMENT:
 - Use reset_crm_user_password to reset a user's password
 - Available companies: dtiq, packetfabric, element8, qwilt, welink, dev
 - For bulk operations across all instances, call the tool once per company
+
+GITHUB MONITORING:
+- Use github_list_repos to see all org repos with stats
+- Use github_list_commits to view recent commits (all repos or specific repo)
+- Use github_list_prs to see pull requests (open, closed, or all)
+- Use github_org_activity for an org-wide activity summary (commits, PRs, top contributors)
 
 Be concise and direct. Use tools to get real data - don't guess.
 When you complete an action, confirm what you did.
@@ -737,6 +782,57 @@ const tools = [
         submitted_by: { type: "string", description: "Email or name of submitter" }
       },
       required: ["type", "category", "description"]
+    }
+  },
+  // ============ GITHUB TOOLS ============
+  {
+    name: "github_list_repos",
+    description: "List all repositories in the DAAITeam GitHub organization with basic stats",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sort: { type: "string", enum: ["pushed", "updated", "created", "full_name"], description: "Sort field (default: pushed)" },
+        per_page: { type: "number", description: "Results per page (default: 30, max: 100)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "github_list_commits",
+    description: "List recent commits for a specific repo, or across all org repos if no repo specified",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "Repository name (e.g., 'CRMBackend'). If omitted, fetches from all repos." },
+        author: { type: "string", description: "Filter by commit author GitHub username" },
+        since: { type: "string", description: "ISO 8601 date — only commits after this date (default: 7 days ago)" },
+        per_page: { type: "number", description: "Commits per repo (default: 10, max: 100)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "github_list_prs",
+    description: "List pull requests across the org or for a specific repo",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "Repository name. If omitted, fetches PRs from all repos." },
+        state: { type: "string", enum: ["open", "closed", "all"], description: "PR state filter (default: open)" },
+        per_page: { type: "number", description: "PRs per repo (default: 10, max: 100)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "github_org_activity",
+    description: "Get a summary of recent GitHub org activity: repo count, recent commits, open PRs, top contributors",
+    inputSchema: {
+      type: "object",
+      properties: {
+        days: { type: "number", description: "Look-back window in days (default: 7, max: 30)" }
+      },
+      required: []
     }
   }
 ];
@@ -1534,6 +1630,211 @@ const handlers = {
       [type, category, subject || null, description, priority || 'medium', pageUrl || null, referenceUrl || null, submitted_by || null]
     );
     return { id: row.id, ...row };
+  },
+
+  // ============ GITHUB HANDLERS ============
+
+  async github_list_repos({ sort = 'pushed', per_page = 30 }) {
+    const repos = await callGitHub(`/orgs/${GITHUB_ORG}/repos`, {
+      sort,
+      per_page: Math.min(per_page, 100),
+      type: 'all',
+    });
+    return repos.map(r => ({
+      name: r.name,
+      full_name: r.full_name,
+      description: r.description,
+      private: r.private,
+      html_url: r.html_url,
+      language: r.language,
+      default_branch: r.default_branch,
+      open_issues_count: r.open_issues_count,
+      stargazers_count: r.stargazers_count,
+      pushed_at: r.pushed_at,
+      updated_at: r.updated_at,
+      created_at: r.created_at,
+    }));
+  },
+
+  async github_list_commits({ repo, author, since, per_page = 10 }) {
+    const sinceDate = since || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const limit = Math.min(per_page, 100);
+
+    if (repo) {
+      const commits = await callGitHub(`/repos/${GITHUB_ORG}/${repo}/commits`, {
+        since: sinceDate,
+        per_page: limit,
+        ...(author && { author }),
+      });
+      return commits.map(c => ({
+        sha: c.sha,
+        message: c.commit.message.split('\n')[0],
+        full_message: c.commit.message,
+        author: c.commit.author.name,
+        author_login: c.author?.login || null,
+        author_avatar: c.author?.avatar_url || null,
+        date: c.commit.author.date,
+        url: c.html_url,
+        repo,
+      }));
+    }
+
+    // All repos — fetch repos then commits in parallel
+    const repos = await callGitHub(`/orgs/${GITHUB_ORG}/repos`, { sort: 'pushed', per_page: 20 });
+    const allCommits = [];
+
+    await Promise.all(repos.map(async (r) => {
+      try {
+        const commits = await callGitHub(`/repos/${GITHUB_ORG}/${r.name}/commits`, {
+          since: sinceDate,
+          per_page: Math.min(limit, 5),
+          ...(author && { author }),
+        });
+        for (const c of commits) {
+          allCommits.push({
+            sha: c.sha,
+            message: c.commit.message.split('\n')[0],
+            author: c.commit.author.name,
+            author_login: c.author?.login || null,
+            author_avatar: c.author?.avatar_url || null,
+            date: c.commit.author.date,
+            url: c.html_url,
+            repo: r.name,
+          });
+        }
+      } catch (err) {
+        // Skip repos with errors (empty repos, etc.)
+      }
+    }));
+
+    allCommits.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return allCommits.slice(0, 50);
+  },
+
+  async github_list_prs({ repo, state = 'open', per_page = 10 }) {
+    const limit = Math.min(per_page, 100);
+
+    if (repo) {
+      const prs = await callGitHub(`/repos/${GITHUB_ORG}/${repo}/pulls`, {
+        state,
+        per_page: limit,
+        sort: 'updated',
+        direction: 'desc',
+      });
+      return prs.map(pr => ({
+        number: pr.number,
+        title: pr.title,
+        state: pr.state,
+        author: pr.user.login,
+        author_avatar: pr.user.avatar_url,
+        created_at: pr.created_at,
+        updated_at: pr.updated_at,
+        merged_at: pr.merged_at,
+        closed_at: pr.closed_at,
+        url: pr.html_url,
+        draft: pr.draft,
+        labels: pr.labels.map(l => l.name),
+        repo,
+      }));
+    }
+
+    // All repos
+    const repos = await callGitHub(`/orgs/${GITHUB_ORG}/repos`, { sort: 'pushed', per_page: 20 });
+    const allPRs = [];
+
+    await Promise.all(repos.map(async (r) => {
+      try {
+        const prs = await callGitHub(`/repos/${GITHUB_ORG}/${r.name}/pulls`, {
+          state,
+          per_page: Math.min(limit, 5),
+          sort: 'updated',
+          direction: 'desc',
+        });
+        for (const pr of prs) {
+          allPRs.push({
+            number: pr.number,
+            title: pr.title,
+            state: pr.state,
+            author: pr.user.login,
+            author_avatar: pr.user.avatar_url,
+            created_at: pr.created_at,
+            updated_at: pr.updated_at,
+            merged_at: pr.merged_at,
+            url: pr.html_url,
+            draft: pr.draft,
+            labels: pr.labels.map(l => l.name),
+            repo: r.name,
+          });
+        }
+      } catch (err) {
+        // Skip repos with errors
+      }
+    }));
+
+    allPRs.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+    return allPRs.slice(0, 50);
+  },
+
+  async github_org_activity({ days = 7 }) {
+    const since = new Date(Date.now() - Math.min(days, 30) * 24 * 60 * 60 * 1000).toISOString();
+
+    const repos = await callGitHub(`/orgs/${GITHUB_ORG}/repos`, { sort: 'pushed', per_page: 50 });
+
+    let totalCommits = 0;
+    let totalOpenPRs = 0;
+    const contributorMap = {};
+    const repoActivity = [];
+
+    await Promise.all(repos.map(async (r) => {
+      let repoCommits = 0;
+      let repoPRs = 0;
+      try {
+        const [commits, prs] = await Promise.all([
+          callGitHub(`/repos/${GITHUB_ORG}/${r.name}/commits`, { since, per_page: 100 }),
+          callGitHub(`/repos/${GITHUB_ORG}/${r.name}/pulls`, { state: 'open', per_page: 100 }),
+        ]);
+        repoCommits = commits.length;
+        repoPRs = prs.length;
+        totalCommits += commits.length;
+        totalOpenPRs += prs.length;
+
+        for (const c of commits) {
+          const login = c.author?.login || c.commit.author.name;
+          if (!contributorMap[login]) {
+            contributorMap[login] = { login, avatar: c.author?.avatar_url || null, commits: 0 };
+          }
+          contributorMap[login].commits++;
+        }
+      } catch (err) {
+        // Skip
+      }
+      repoActivity.push({
+        repo: r.name,
+        commits: repoCommits,
+        open_prs: repoPRs,
+        pushed_at: r.pushed_at,
+        language: r.language,
+      });
+    }));
+
+    const topContributors = Object.values(contributorMap)
+      .sort((a, b) => b.commits - a.commits)
+      .slice(0, 10);
+
+    const activeRepos = repoActivity
+      .filter(r => r.commits > 0)
+      .sort((a, b) => b.commits - a.commits);
+
+    return {
+      org: GITHUB_ORG,
+      period_days: Math.min(days, 30),
+      since,
+      total_repos: repos.length,
+      total_commits: totalCommits,
+      total_open_prs: totalOpenPRs,
+      active_repos: activeRepos,
+      top_contributors: topContributors,
+    };
   }
 };
 
@@ -1735,6 +2036,58 @@ app.patch('/api/feedback/:company/:id', async (req, res) => {
     if (resolutionNotes !== undefined) body.resolutionNotes = resolutionNotes;
     const result = await callCRM(company, 'PATCH', `/tester-feedback/${id}`, body);
     res.json({ ...result, _company: company, success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============ GITHUB REST API ============
+
+app.get('/api/github/repos', async (req, res) => {
+  try {
+    const result = await handlers.github_list_repos({
+      sort: req.query.sort || 'pushed',
+      per_page: parseInt(req.query.per_page) || 30,
+    });
+    res.json({ repos: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/github/commits', async (req, res) => {
+  try {
+    const result = await handlers.github_list_commits({
+      repo: req.query.repo || undefined,
+      author: req.query.author || undefined,
+      since: req.query.since || undefined,
+      per_page: parseInt(req.query.per_page) || 10,
+    });
+    res.json({ commits: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/github/prs', async (req, res) => {
+  try {
+    const result = await handlers.github_list_prs({
+      repo: req.query.repo || undefined,
+      state: req.query.state || 'open',
+      per_page: parseInt(req.query.per_page) || 10,
+    });
+    res.json({ prs: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/github/activity', async (req, res) => {
+  try {
+    const result = await handlers.github_org_activity({
+      days: parseInt(req.query.days) || 7,
+    });
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1979,7 +2332,11 @@ app.get('/', (req, res) => {
       '/api/dashboard-users': 'List/Create dashboard users (GET/POST)',
       '/api/dashboard-users/by-email/:email': 'Get user by email (GET)',
       '/api/dashboard-users/:uid/role': 'Update user role (PATCH)',
-      '/api/dashboard-users/:uid': 'Delete user (DELETE)'
+      '/api/dashboard-users/:uid': 'Delete user (DELETE)',
+      '/api/github/repos': 'List org repos (GET)',
+      '/api/github/commits': 'List commits, ?repo=X&author=Y&since=Z (GET)',
+      '/api/github/prs': 'List PRs, ?repo=X&state=open|closed|all (GET)',
+      '/api/github/activity': 'Org activity summary, ?days=7 (GET)'
     }
   });
 });
