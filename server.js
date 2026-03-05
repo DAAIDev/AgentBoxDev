@@ -109,6 +109,24 @@ function getServiceName(tenant) {
   return service;
 }
 
+function extractLogMessage(entry) {
+  let message = entry.textPayload || '';
+  if (!message && entry.jsonPayload) {
+    message = entry.jsonPayload.message
+      || entry.jsonPayload.fields?.message?.stringValue
+      || entry.jsonPayload.msg
+      || JSON.stringify(entry.jsonPayload);
+  }
+  if (!message && entry.httpRequest) {
+    const r = entry.httpRequest;
+    message = `${r.requestMethod || 'GET'} ${r.requestUrl || ''} ${r.status || ''}`;
+  }
+  if (!message && entry.protoPayload) {
+    message = entry.protoPayload.methodName || JSON.stringify(entry.protoPayload);
+  }
+  return message || '(no message)';
+}
+
 // ============ CRM INSTANCE CONFIG ============
 const CRM_COMPANIES = (process.env.CRM_INSTANCES || 'dtiq,packetfabric,element8,qwilt,welink,dev').split(',');
 
@@ -2199,8 +2217,12 @@ const handlers = {
     const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
 
     let filter = `resource.type="cloud_run_revision" AND resource.labels.service_name="${serviceName}" AND timestamp>="${since}"`;
-    if (severity) filter += ` AND severity="${severity}"`;
-    if (search) filter += ` AND (textPayload=~"${search}" OR jsonPayload.message=~"${search}" OR httpRequest.requestUrl=~"${search}" OR httpRequest.requestMethod=~"${search}" OR severity=~"${search}")`;
+    const validSeverities = ['DEFAULT', 'DEBUG', 'INFO', 'NOTICE', 'WARNING', 'ERROR', 'CRITICAL', 'ALERT', 'EMERGENCY'];
+    if (severity && validSeverities.includes(severity)) filter += ` AND severity="${severity}"`;
+    if (search) {
+      const sanitized = search.replace(/["\\]/g, '');
+      if (sanitized) filter += ` AND (textPayload=~"${sanitized}" OR jsonPayload.message=~"${sanitized}" OR httpRequest.requestUrl=~"${sanitized}")`;
+    }
 
     const { data } = await logging.entries.list({
       requestBody: {
@@ -2211,32 +2233,14 @@ const handlers = {
       },
     });
 
-    return (data.entries || []).map((entry) => {
-      // Extract message from whichever payload field exists
-      let message = entry.textPayload || '';
-      if (!message && entry.jsonPayload) {
-        // jsonPayload may have a 'message' field or 'fields.message'
-        message = entry.jsonPayload.message
-          || entry.jsonPayload.fields?.message?.stringValue
-          || entry.jsonPayload.msg
-          || JSON.stringify(entry.jsonPayload);
-      }
-      if (!message && entry.httpRequest) {
-        const r = entry.httpRequest;
-        message = `${r.requestMethod || 'GET'} ${r.requestUrl || ''} ${r.status || ''}`;
-      }
-      if (!message && entry.protoPayload) {
-        message = entry.protoPayload.methodName || JSON.stringify(entry.protoPayload);
-      }
-      return {
-        timestamp: entry.timestamp,
-        severity: entry.severity || 'DEFAULT',
-        message: message || '(no message)',
-        log_name: entry.logName?.split('/').pop(),
-        trace_id: entry.trace || null,
-        json_payload: entry.jsonPayload || entry.httpRequest || entry.protoPayload || null,
-      };
-    });
+    return (data.entries || []).map((entry) => ({
+      timestamp: entry.timestamp,
+      severity: entry.severity || 'DEFAULT',
+      message: extractLogMessage(entry),
+      log_name: entry.logName?.split('/').pop(),
+      trace_id: entry.trace || null,
+      json_payload: entry.jsonPayload || entry.httpRequest || entry.protoPayload || null,
+    }));
   },
 
   async get_deployment_log_summary({ tenant, hours_back }) {
@@ -2248,12 +2252,11 @@ const handlers = {
     const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
     const filter = `resource.type="cloud_run_revision" AND resource.labels.service_name="${serviceName}" AND timestamp>="${since}"`;
 
-    // Fetch recent logs and aggregate by severity
+    // Fetch severity counts + recent errors in parallel
     const severities = ['ERROR', 'WARNING', 'INFO', 'DEBUG', 'NOTICE', 'CRITICAL'];
     const counts = {};
-    let total = 0;
 
-    for (const sev of severities) {
+    const countPromises = severities.map(async (sev) => {
       try {
         const { data } = await logging.entries.list({
           requestBody: {
@@ -2262,42 +2265,29 @@ const handlers = {
             pageSize: 1,
           },
         });
-        // The API doesn't return a count directly, so we estimate from the entries
-        // For a proper count we'd need Cloud Monitoring log-based metrics
-        counts[sev] = data.entries?.length ? '1+' : 0;
+        counts[sev] = data.entries?.length ? 1 : 0;
       } catch {
         counts[sev] = 0;
       }
-    }
+    });
 
-    // Fetch recent errors for the summary
-    const { data: errorData } = await logging.entries.list({
+    const errorPromise = logging.entries.list({
       requestBody: {
         resourceNames: [`projects/${GCP_PROJECT_ID}`],
         filter: `${filter} AND severity>="ERROR"`,
         orderBy: 'timestamp desc',
         pageSize: 5,
       },
-    });
+    }).catch(() => ({ data: { entries: [] } }));
 
-    const recentErrors = (errorData.entries || []).map((e) => {
-      let message = e.textPayload || '';
-      if (!message && e.jsonPayload) {
-        message = e.jsonPayload.message || e.jsonPayload.fields?.message?.stringValue || e.jsonPayload.msg || JSON.stringify(e.jsonPayload);
-      }
-      if (!message && e.httpRequest) {
-        const r = e.httpRequest;
-        message = `${r.requestMethod || 'GET'} ${r.requestUrl || ''} ${r.status || ''}`;
-      }
-      if (!message && e.protoPayload) {
-        message = e.protoPayload.methodName || JSON.stringify(e.protoPayload);
-      }
-      return {
-        timestamp: e.timestamp,
-        severity: e.severity,
-        message: message || '(no message)',
-      };
-    });
+    await Promise.all([...countPromises, errorPromise]);
+    const { data: errorData } = await errorPromise;
+
+    const recentErrors = (errorData.entries || []).map((e) => ({
+      timestamp: e.timestamp,
+      severity: e.severity,
+      message: extractLogMessage(e),
+    }));
 
     return {
       hours_back: hours,
