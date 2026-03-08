@@ -319,6 +319,18 @@ const tools = [
     }
   },
   {
+    name: "update_company_description",
+    description: "Update a company's description / summary text",
+    inputSchema: {
+      type: "object",
+      properties: {
+        slug: { type: "string", description: "Company slug" },
+        description: { type: "string", description: "New description text" }
+      },
+      required: ["slug", "description"]
+    }
+  },
+  {
     name: "list_milestones",
     description: "List all milestones for a company",
     inputSchema: {
@@ -1305,6 +1317,14 @@ const handlers = {
     const rows = await query(
       'UPDATE companies SET status = $1, updated_at = NOW() WHERE slug = $2 RETURNING *',
       [status, slug]
+    );
+    return { success: true, company: rows[0] };
+  },
+
+  async update_company_description({ slug, description }) {
+    const rows = await query(
+      'UPDATE companies SET description = $1, updated_at = NOW() WHERE slug = $2 RETURNING *',
+      [description, slug]
     );
     return { success: true, company: rows[0] };
   },
@@ -3472,16 +3492,100 @@ app.post('/upload', async (req, res) => {
   }
 });
 
-// ============ MCP ENDPOINTS ============
+// ============ MCP ENDPOINTS (Streamable HTTP) ============
+// Session tracking for MCP Streamable HTTP
+const mcpSessions = new Map(); // sessionId -> { created, lastUsed }
+function generateMcpSessionId() {
+  return 'mcp_' + require('crypto').randomUUID();
+}
+
+// GET /mcp — SSE stream endpoint (required by spec, used for server-initiated messages)
 app.get('/mcp', (req, res) => {
+  const sessionId = req.headers['mcp-session-id'];
+  if (sessionId && !mcpSessions.has(sessionId)) {
+    return res.status(404).json({ error: 'Invalid session' });
+  }
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
-  const keepAlive = setInterval(() => { res.write(`data: ${JSON.stringify({ type: 'ping' })}\n\n`); }, 30000);
+  if (sessionId) res.setHeader('Mcp-Session-Id', sessionId);
+  res.write(`data: ${JSON.stringify({ jsonrpc: '2.0', method: 'ping' })}\n\n`);
+  const keepAlive = setInterval(() => { res.write(': keepalive\n\n'); }, 30000);
   req.on('close', () => { clearInterval(keepAlive); });
 });
 
+// POST /mcp — Main MCP JSON-RPC endpoint (Streamable HTTP)
+app.post('/mcp', async (req, res) => {
+  const { jsonrpc, id, method, params } = req.body;
+
+  // Helper to wrap results in JSON-RPC 2.0 envelope
+  const rpcWrap = (result) => ({ jsonrpc: '2.0', id, result });
+  const rpcError = (code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
+
+  try {
+    // Handle notifications (no id) — return 202 Accepted
+    if (!id && method) {
+      if (method === 'notifications/initialized') {
+        // Client confirms initialization — nothing to do
+      }
+      return res.status(202).end();
+    }
+
+    switch (method) {
+      case 'initialize': {
+        const sessionId = generateMcpSessionId();
+        mcpSessions.set(sessionId, { created: Date.now(), lastUsed: Date.now() });
+        // Cleanup old sessions (keep last 100)
+        if (mcpSessions.size > 100) {
+          const oldest = [...mcpSessions.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+          for (let i = 0; i < oldest.length - 100; i++) mcpSessions.delete(oldest[i][0]);
+        }
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Mcp-Session-Id', sessionId);
+        res.json(rpcWrap({
+          protocolVersion: '2025-11-25',
+          serverInfo: { name: 'agentboxdev', version: '1.0.0' },
+          capabilities: { tools: {} }
+        }));
+        break;
+      }
+      case 'tools/list': {
+        // Update session last-used
+        const sid = req.headers['mcp-session-id'];
+        if (sid && mcpSessions.has(sid)) mcpSessions.get(sid).lastUsed = Date.now();
+        res.setHeader('Content-Type', 'application/json');
+        if (sid) res.setHeader('Mcp-Session-Id', sid);
+        res.json(rpcWrap({ tools }));
+        break;
+      }
+      case 'tools/call': {
+        const sid = req.headers['mcp-session-id'];
+        if (sid && mcpSessions.has(sid)) mcpSessions.get(sid).lastUsed = Date.now();
+        const { name, arguments: args } = params;
+        if (!handlers[name]) { res.json(rpcError(-32602, `Tool not found: ${name}`)); return; }
+        const result = await handlers[name](args || {});
+        res.setHeader('Content-Type', 'application/json');
+        if (sid) res.setHeader('Mcp-Session-Id', sid);
+        res.json(rpcWrap({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }));
+        break;
+      }
+      default:
+        res.json(rpcError(-32601, `Unknown method: ${method}`));
+    }
+  } catch (error) {
+    console.error('MCP error:', error);
+    res.json(rpcError(-32603, error.message));
+  }
+});
+
+// DELETE /mcp — Session termination (optional, per spec)
+app.delete('/mcp', (req, res) => {
+  const sessionId = req.headers['mcp-session-id'];
+  if (sessionId) mcpSessions.delete(sessionId);
+  res.status(204).end();
+});
+
+// ============ DASHBOARD REST ENDPOINTS (unchanged) ============
 app.get('/tools', (req, res) => { res.json({ tools }); });
 
 app.post('/tools/:name', async (req, res) => {
@@ -3493,40 +3597,6 @@ app.post('/tools/:name', async (req, res) => {
   } catch (error) {
     console.error(`Error executing ${name}:`, error);
     res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/mcp', async (req, res) => {
-  const { jsonrpc, id, method, params } = req.body;
-  const rpcWrap = (result) => jsonrpc === '2.0' ? { jsonrpc: '2.0', id, result } : result;
-  const rpcError = (code, message) => jsonrpc === '2.0'
-    ? { jsonrpc: '2.0', id, error: { code, message } }
-    : { error: message };
-  try {
-    switch (method) {
-      case 'initialize':
-        res.json(rpcWrap({ protocolVersion: '2024-11-05', serverInfo: { name: 'agentboxdev', version: '1.0.0' }, capabilities: { tools: {} } }));
-        break;
-      case 'notifications/initialized':
-        // Client acknowledgment — no response needed for notifications
-        res.status(204).end();
-        break;
-      case 'tools/list':
-        res.json(rpcWrap({ tools }));
-        break;
-      case 'tools/call': {
-        const { name, arguments: args } = params;
-        if (!handlers[name]) { res.json(rpcError(-32602, `Tool not found: ${name}`)); return; }
-        const result = await handlers[name](args || {});
-        res.json(rpcWrap({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }));
-        break;
-      }
-      default:
-        res.json(rpcError(-32601, `Unknown method: ${method}`));
-    }
-  } catch (error) {
-    console.error('MCP error:', error);
-    res.json(rpcError(-32603, error.message));
   }
 });
 
