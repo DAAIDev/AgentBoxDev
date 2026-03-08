@@ -1231,6 +1231,52 @@ const tools = [
       },
       required: ["tenant", "service_type"]
     }
+  },
+
+  // ============ Project Context Tools ============
+  {
+    name: "get_project_context",
+    description: "Get project context for a repo or area. Returns feature statuses, architecture decisions, blockers, key files — so agents don't need to re-scan codebases. Omit area to get all context for a repo.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "Repository: CRMBackend, CRMFrontEnd, AgentBoxDashboard, AgentBoxDev, PhoneAgent, RAGService, devops" },
+        area: { type: "string", description: "Feature area: monitoring, auth, ai, phone, crm, deployment, etc. Omit to get all areas." },
+        status: { type: "string", description: "Filter by status: done, in_progress, stub, not_started, blocked" }
+      },
+      required: ["repo"]
+    }
+  },
+  {
+    name: "update_project_context",
+    description: "Update or create a project context entry. Use this after completing work to keep the shared context current for other devs' agents.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "Repository name" },
+        area: { type: "string", description: "Feature area" },
+        key: { type: "string", description: "Specific feature/component key" },
+        status: { type: "string", description: "Status: done, in_progress, stub, not_started, blocked, deprecated" },
+        summary: { type: "string", description: "Brief summary of current state" },
+        details: { type: "object", description: "Additional structured details (JSON)" },
+        key_files: { type: "array", description: "Key file paths relevant to this feature", items: { type: "string" } },
+        blocked_by: { type: "string", description: "What's blocking this (if status=blocked)" },
+        assigned_to: { type: "string", description: "Who's working on this" },
+        updated_by: { type: "string", description: "Who made this update (dev name or claude-code)" }
+      },
+      required: ["repo", "area", "key", "status", "summary"]
+    }
+  },
+  {
+    name: "list_project_context",
+    description: "List all project context across all repos. Gives a high-level overview of what's done, in progress, blocked, etc. across the entire platform.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "Filter by status" },
+        assigned_to: { type: "string", description: "Filter by assignee" }
+      }
+    }
   }
 ];
 
@@ -2780,6 +2826,58 @@ const handlers = {
 
     const allOk = checks.every(c => c.status === 'ok');
     return { tenant, service_type, status: allOk ? 'pass' : 'warn', checks, warnings };
+  },
+
+  // ============ Project Context Handlers ============
+
+  async get_project_context({ repo, area, status }) {
+    let q = 'SELECT * FROM project_context WHERE repo = $1';
+    let params = [repo];
+    let idx = 2;
+    if (area) { q += ` AND area = $${idx++}`; params.push(area); }
+    if (status) { q += ` AND status = $${idx++}`; params.push(status); }
+    q += ' ORDER BY area, key';
+    const rows = await query(q, params);
+    if (rows.length === 0) return { repo, area, entries: [], message: 'No context found.' };
+    const grouped = {};
+    for (const row of rows) {
+      if (!grouped[row.area]) grouped[row.area] = [];
+      grouped[row.area].push(row);
+    }
+    return { repo, areas: Object.entries(grouped).map(([area, entries]) => ({ area, entries })) };
+  },
+
+  async update_project_context({ repo, area, key, status, summary, details, key_files, blocked_by, assigned_to, updated_by }) {
+    const rows = await query(
+      `INSERT INTO project_context (repo, area, key, status, summary, details, key_files, blocked_by, assigned_to, updated_by, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+       ON CONFLICT (repo, area, key) DO UPDATE SET
+         status = EXCLUDED.status, summary = EXCLUDED.summary,
+         details = COALESCE(EXCLUDED.details, project_context.details),
+         key_files = COALESCE(EXCLUDED.key_files, project_context.key_files),
+         blocked_by = EXCLUDED.blocked_by, assigned_to = EXCLUDED.assigned_to,
+         updated_by = EXCLUDED.updated_by, updated_at = NOW()
+       RETURNING *`,
+      [repo, area, key, status, summary, details || {}, key_files || [], blocked_by || null, assigned_to || null, updated_by || 'system']
+    );
+    return { success: true, entry: rows[0] };
+  },
+
+  async list_project_context({ status, assigned_to } = {}) {
+    let q = 'SELECT repo, area, key, status, summary, blocked_by, assigned_to, updated_by, updated_at FROM project_context';
+    let params = [];
+    let conditions = [];
+    if (status) { conditions.push(`status = $${conditions.length + 1}`); params.push(status); }
+    if (assigned_to) { conditions.push(`assigned_to = $${conditions.length + 1}`); params.push(assigned_to); }
+    if (conditions.length) q += ' WHERE ' + conditions.join(' AND ');
+    q += ' ORDER BY repo, area, key';
+    const rows = await query(q, params);
+    const grouped = {};
+    for (const row of rows) {
+      if (!grouped[row.repo]) grouped[row.repo] = [];
+      grouped[row.repo].push(row);
+    }
+    return { repos: Object.entries(grouped).map(([repo, entries]) => ({ repo, entries })) };
   }
 };
 
@@ -3296,6 +3394,29 @@ app.post('/api/infra/deploy-check', async (req, res) => {
     const result = await handlers.run_deploy_check(req.body);
     res.json(result);
   } catch (err) { res.status(err.message.includes('No config') ? 404 : 500).json({ error: err.message }); }
+});
+
+// ============ PROJECT CONTEXT REST API ============
+
+app.get('/api/context', async (req, res) => {
+  try {
+    const result = await handlers.list_project_context({ status: req.query.status, assigned_to: req.query.assigned_to });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/context/:repo', async (req, res) => {
+  try {
+    const result = await handlers.get_project_context({ repo: req.params.repo, area: req.query.area, status: req.query.status });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/context', async (req, res) => {
+  try {
+    const result = await handlers.update_project_context(req.body);
+    res.status(201).json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============ CHAT ENDPOINT - THE BRAIN ============

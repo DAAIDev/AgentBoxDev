@@ -321,3 +321,31 @@ CREATE TABLE IF NOT EXISTS tenant_configs (
 CREATE INDEX IF NOT EXISTS idx_tc_tenant ON tenant_configs(tenant);
 CREATE INDEX IF NOT EXISTS idx_tc_service ON tenant_configs(service_type);
 CREATE INDEX IF NOT EXISTS idx_tc_status ON tenant_configs(status);
+
+-- ============================================
+-- Project Context (Shared Team Knowledge)
+-- ============================================
+
+-- Stores feature status, architecture decisions, blockers, and context
+-- so any dev's Claude agent can query it instead of re-scanning codebases.
+CREATE TABLE IF NOT EXISTS project_context (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo        TEXT NOT NULL,
+  area        TEXT NOT NULL,
+  key         TEXT NOT NULL,
+  status      TEXT DEFAULT 'unknown' CHECK (status IN ('done', 'in_progress', 'stub', 'not_started', 'blocked', 'deprecated', 'unknown')),
+  summary     TEXT NOT NULL,
+  details     JSONB DEFAULT '{}',
+  key_files   JSONB DEFAULT '[]',
+  blocked_by  TEXT,
+  assigned_to TEXT,
+  updated_by  TEXT DEFAULT 'system',
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ DEFAULT NOW(),
+
+  UNIQUE(repo, area, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pc_repo ON project_context(repo);
+CREATE INDEX IF NOT EXISTS idx_pc_area ON project_context(repo, area);
+CREATE INDEX IF NOT EXISTS idx_pc_status ON project_context(status);
