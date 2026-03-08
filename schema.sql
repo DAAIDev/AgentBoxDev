@@ -273,3 +273,51 @@ CREATE INDEX IF NOT EXISTS idx_error_triage_auto_fixable ON error_triage(auto_fi
 CREATE INDEX IF NOT EXISTS idx_autofix_runs_status ON autofix_runs(status);
 CREATE INDEX IF NOT EXISTS idx_autofix_runs_triage ON autofix_runs(error_triage_id);
 CREATE INDEX IF NOT EXISTS idx_autofix_runs_created ON autofix_runs(created_at DESC);
+
+-- ============================================
+-- Infrastructure Registry (Tenant Configs)
+-- ============================================
+
+-- One row per service (not per company). E.g. PacketFabric has backend + frontend rows.
+CREATE TABLE IF NOT EXISTS tenant_configs (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant          TEXT NOT NULL,
+  service_type    TEXT NOT NULL,
+
+  -- Cloud Run / hosting details
+  cloud_run_service   TEXT,
+  cloud_run_url       TEXT,
+  gcp_project         TEXT DEFAULT 'agentbox-485618',
+  gcp_region          TEXT DEFAULT 'us-central1',
+
+  -- Git
+  github_repo         TEXT,
+  git_branch          TEXT,
+
+  -- Required env vars (names + descriptions, NOT values)
+  env_vars_required   JSONB DEFAULT '[]',
+
+  -- Secret references (names only — values stay in GCP Secret Manager)
+  secrets             JSONB DEFAULT '[]',
+
+  -- Deploy command template
+  deploy_command      TEXT,
+
+  -- Feature flags for this service
+  feature_flags       JSONB DEFAULT '{}',
+
+  -- Known issues / gotchas
+  notes               TEXT,
+
+  -- Metadata
+  status              TEXT DEFAULT 'active',
+  last_deployed_at    TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ DEFAULT NOW(),
+
+  UNIQUE(tenant, service_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tc_tenant ON tenant_configs(tenant);
+CREATE INDEX IF NOT EXISTS idx_tc_service ON tenant_configs(service_type);
+CREATE INDEX IF NOT EXISTS idx_tc_status ON tenant_configs(status);

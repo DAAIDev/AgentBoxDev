@@ -1171,6 +1171,66 @@ const tools = [
       },
       required: ["id"]
     }
+  },
+
+  // ============ Infrastructure Registry Tools ============
+  {
+    name: "get_tenant_config",
+    description: "Get infrastructure config for a tenant's service. Returns Cloud Run URL, env vars, deploy command, secrets, git branch, feature flags, and known issues. Omit service_type to get all services for the tenant.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", description: "Tenant slug: packetfabric, welink, element8, qwilt, dtiq, dev, dashboard, mcp-server" },
+        service_type: { type: "string", description: "Service type: backend, frontend, rag, phone-agent, mcp, dashboard. Omit to get all services for the tenant." }
+      },
+      required: ["tenant"]
+    }
+  },
+  {
+    name: "list_tenant_configs",
+    description: "List all tenant configurations. Optionally filter by status. Returns tenant name, services, and their statuses — gives an overview of the entire platform.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "Filter by status: active, deploying, down, deprecated" }
+      }
+    }
+  },
+  {
+    name: "get_service_env_vars",
+    description: "Get required environment variables for a tenant's service. Returns var names, descriptions, and whether they're secrets.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", description: "Tenant slug" },
+        service_type: { type: "string", description: "Service type: backend, frontend, rag, phone-agent, mcp, dashboard" }
+      },
+      required: ["tenant", "service_type"]
+    }
+  },
+  {
+    name: "get_deploy_command",
+    description: "Get the exact deploy command for a tenant's service. Returns the gcloud command with all flags pre-filled.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", description: "Tenant slug" },
+        service_type: { type: "string", description: "Service type" }
+      },
+      required: ["tenant", "service_type"]
+    }
+  },
+  {
+    name: "run_deploy_check",
+    description: "Validate that a tenant's service config is complete. Checks that Cloud Run service, deploy command, env vars, and secrets are all documented. Returns pass/fail with details.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant: { type: "string", description: "Tenant slug" },
+        service_type: { type: "string", description: "Service type" }
+      },
+      required: ["tenant", "service_type"]
+    }
   }
 ];
 
@@ -2642,6 +2702,84 @@ const handlers = {
     );
     if (!rows.length) throw new Error(`Autofix run not found or not cancellable: ${id}`);
     return { success: true, autofix_run: rows[0] };
+  },
+
+  // ============ Infrastructure Registry Handlers ============
+
+  async get_tenant_config({ tenant, service_type }) {
+    let q = 'SELECT * FROM tenant_configs WHERE tenant = $1';
+    let params = [tenant];
+    if (service_type) {
+      q += ' AND service_type = $2';
+      params.push(service_type);
+    }
+    const rows = await query(q, params);
+    if (rows.length === 0) {
+      return { error: `No config found for tenant '${tenant}'${service_type ? ` service '${service_type}'` : ''}` };
+    }
+    return service_type ? rows[0] : { tenant, services: rows };
+  },
+
+  async list_tenant_configs({ status } = {}) {
+    let q = 'SELECT tenant, service_type, cloud_run_service, cloud_run_url, status, github_repo, git_branch, feature_flags, notes FROM tenant_configs';
+    let params = [];
+    if (status) {
+      q += ' WHERE status = $1';
+      params.push(status);
+    }
+    q += ' ORDER BY tenant, service_type';
+    const rows = await query(q, params);
+    const grouped = {};
+    for (const row of rows) {
+      if (!grouped[row.tenant]) grouped[row.tenant] = [];
+      grouped[row.tenant].push(row);
+    }
+    return { tenants: Object.entries(grouped).map(([tenant, services]) => ({ tenant, services })) };
+  },
+
+  async get_service_env_vars({ tenant, service_type }) {
+    const row = await queryOne(
+      'SELECT env_vars_required, secrets FROM tenant_configs WHERE tenant = $1 AND service_type = $2',
+      [tenant, service_type]
+    );
+    if (!row) throw new Error(`No config found for ${tenant}/${service_type}`);
+    return { tenant, service_type, env_vars: row.env_vars_required || [], secrets: row.secrets || [] };
+  },
+
+  async get_deploy_command({ tenant, service_type }) {
+    const row = await queryOne(
+      'SELECT deploy_command, cloud_run_service, git_branch, github_repo, notes FROM tenant_configs WHERE tenant = $1 AND service_type = $2',
+      [tenant, service_type]
+    );
+    if (!row) throw new Error(`No config found for ${tenant}/${service_type}`);
+    if (!row.deploy_command) {
+      return { warning: `No deploy command documented for ${tenant}/${service_type}. Deploys via GitHub Actions on push to ${row.git_branch || 'main'}.`, ...row };
+    }
+    return row;
+  },
+
+  async run_deploy_check({ tenant, service_type }) {
+    const row = await queryOne('SELECT * FROM tenant_configs WHERE tenant = $1 AND service_type = $2', [tenant, service_type]);
+    if (!row) throw new Error(`No config found for ${tenant}/${service_type}`);
+    const checks = [];
+    const warnings = [];
+
+    checks.push({ check: 'cloud_run_service', status: row.cloud_run_service ? 'ok' : 'missing', value: row.cloud_run_service });
+    checks.push({ check: 'deploy_command', status: row.deploy_command ? 'ok' : 'warn', value: row.deploy_command ? 'set' : 'not set (uses GitHub Actions)' });
+    checks.push({ check: 'git_branch', status: row.git_branch ? 'ok' : 'missing', value: row.git_branch });
+    checks.push({ check: 'github_repo', status: row.github_repo ? 'ok' : 'missing', value: row.github_repo });
+
+    const envVars = row.env_vars_required || [];
+    checks.push({ check: 'env_vars_documented', status: envVars.length > 0 ? 'ok' : 'warn', count: envVars.length });
+    const secrets = row.secrets || [];
+    checks.push({ check: 'secrets_documented', status: secrets.length > 0 ? 'ok' : 'warn', count: secrets.length });
+
+    if (envVars.length === 0) warnings.push('No env vars documented — this service may have undocumented dependencies.');
+    if (secrets.length === 0) warnings.push('No secrets documented.');
+    if (row.notes) warnings.push(`Note: ${row.notes}`);
+
+    const allOk = checks.every(c => c.status === 'ok');
+    return { tenant, service_type, status: allOk ? 'pass' : 'warn', checks, warnings };
   }
 };
 
@@ -3114,6 +3252,50 @@ app.post('/api/autofix-runs/:id/cancel', async (req, res) => {
     const result = await handlers.cancel_autofix({ id: req.params.id });
     res.json(result);
   } catch (err) { res.status(err.message.includes('not found') ? 404 : 500).json({ error: err.message }); }
+});
+
+// ============ INFRASTRUCTURE REGISTRY REST API ============
+
+app.get('/api/infra/tenants', async (req, res) => {
+  try {
+    const result = await handlers.list_tenant_configs({ status: req.query.status });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/infra/tenants/:tenant', async (req, res) => {
+  try {
+    const result = await handlers.get_tenant_config({ tenant: req.params.tenant });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/infra/tenants/:tenant/:serviceType', async (req, res) => {
+  try {
+    const result = await handlers.get_tenant_config({ tenant: req.params.tenant, service_type: req.params.serviceType });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/infra/tenants/:tenant/:serviceType/env', async (req, res) => {
+  try {
+    const result = await handlers.get_service_env_vars({ tenant: req.params.tenant, service_type: req.params.serviceType });
+    res.json(result);
+  } catch (err) { res.status(err.message.includes('No config') ? 404 : 500).json({ error: err.message }); }
+});
+
+app.get('/api/infra/tenants/:tenant/:serviceType/deploy-command', async (req, res) => {
+  try {
+    const result = await handlers.get_deploy_command({ tenant: req.params.tenant, service_type: req.params.serviceType });
+    res.json(result);
+  } catch (err) { res.status(err.message.includes('No config') ? 404 : 500).json({ error: err.message }); }
+});
+
+app.post('/api/infra/deploy-check', async (req, res) => {
+  try {
+    const result = await handlers.run_deploy_check(req.body);
+    res.json(result);
+  } catch (err) { res.status(err.message.includes('No config') ? 404 : 500).json({ error: err.message }); }
 });
 
 // ============ CHAT ENDPOINT - THE BRAIN ============
