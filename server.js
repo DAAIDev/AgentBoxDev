@@ -3255,9 +3255,156 @@ app.get('/', (req, res) => {
       '/api/github/repos': 'List org repos (GET)',
       '/api/github/commits': 'List commits, ?repo=X&author=Y&since=Z (GET)',
       '/api/github/prs': 'List PRs, ?repo=X&state=open|closed|all (GET)',
-      '/api/github/activity': 'Org activity summary, ?days=7 (GET)'
+      '/api/github/activity': 'Org activity summary, ?days=7 (GET)',
+      '/api/company-snapshot/:slug': 'Company snapshot BFF - aggregated data (GET)',
+      '/api/portfolio-summary': 'Portfolio summary with CRM/RAG stats per company (GET)'
     }
   });
+});
+
+// ============ COMPANY SNAPSHOT BFF ============
+app.get('/api/company-snapshot/:slug', async (req, res) => {
+  const { slug } = req.params;
+  try {
+    // Fetch company info from local DB
+    const company = await queryOne('SELECT * FROM companies WHERE slug = $1', [slug]);
+    if (!company) return res.status(404).json({ error: `Company ${slug} not found` });
+
+    // Fetch milestones, contacts, requirements, recent activity from local DB
+    const [milestones, contacts, requirements, activity, devTasks] = await Promise.all([
+      query('SELECT * FROM milestones WHERE company_id = $1 ORDER BY order_index', [company.id]),
+      query('SELECT * FROM contacts WHERE company_id = $1 ORDER BY is_primary DESC, name', [company.id]),
+      query('SELECT * FROM requirements WHERE company_id = $1 ORDER BY updated_at DESC', [company.id]),
+      query('SELECT * FROM activity WHERE company_id = $1 ORDER BY created_at DESC LIMIT 10', [company.id]),
+      query("SELECT * FROM dev_tasks WHERE company_id = $1 AND status != 'done' ORDER BY priority DESC, created_at DESC LIMIT 5", [company.id]),
+    ]);
+
+    // Fetch deployment info
+    let deployment = null;
+    try {
+      const dep = await queryOne('SELECT * FROM deployments WHERE slug = $1', [slug]);
+      if (dep) {
+        const components = await query('SELECT * FROM deployment_components WHERE deployment_id = $1', [dep.id]);
+        deployment = { ...dep, components };
+      }
+    } catch (e) { /* deployment may not exist */ }
+
+    // Fetch CRM data in parallel (data-summary, metrics, satisfaction, insights, RAG stats)
+    let crmData = null;
+    const config = getCRMConfig(slug);
+    if (config.url && config.apiKey) {
+      const results = await Promise.allSettled([
+        callCRM(slug, 'GET', '/metrics/data-summary'),
+        callCRM(slug, 'GET', '/metrics?timeRange=7d'),
+        callCRM(slug, 'GET', '/satisfaction/stats?days=30'),
+        callCRM(slug, 'GET', '/insights/summary'),
+        callCRM(slug, 'GET', '/rag/stats'),
+      ]);
+
+      crmData = {
+        dataSummary: results[0].status === 'fulfilled' ? results[0].value?.data : null,
+        metrics: results[1].status === 'fulfilled' ? results[1].value?.data : null,
+        satisfaction: results[2].status === 'fulfilled' ? results[2].value?.data : null,
+        insights: results[3].status === 'fulfilled' ? results[3].value?.data : null,
+        ragStats: results[4].status === 'fulfilled' ? results[4].value?.data : null,
+      };
+    }
+
+    // Health check CRM
+    let health = { status: 'not_configured' };
+    if (config.url) {
+      try {
+        const startTime = Date.now();
+        const healthResp = await fetch(`${config.url}/api/health`, { signal: AbortSignal.timeout(5000) });
+        health = { status: healthResp.ok ? 'healthy' : 'unhealthy', latency_ms: Date.now() - startTime };
+      } catch (e) {
+        health = { status: 'down', error: e.message };
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        company,
+        milestones,
+        contacts,
+        requirements,
+        activity,
+        devTasks,
+        deployment,
+        crm: crmData,
+        health,
+      },
+    });
+  } catch (err) {
+    console.error(`Error fetching snapshot for ${slug}:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============ PORTFOLIO SUMMARY BFF ============
+app.get('/api/portfolio-summary', async (req, res) => {
+  try {
+    const companies = await query('SELECT * FROM companies ORDER BY name');
+
+    const summaries = await Promise.all(companies.map(async (company) => {
+      const [milestones, devTaskCount] = await Promise.all([
+        query('SELECT * FROM milestones WHERE company_id = $1 ORDER BY order_index', [company.id]),
+        queryOne("SELECT count(*)::int as count FROM dev_tasks WHERE company_id = $1 AND status != 'done'", [company.id]),
+      ]);
+
+      const totalMilestones = milestones.length;
+      const doneMilestones = milestones.filter(m => m.status === 'done').length;
+      const progress = totalMilestones > 0 ? Math.round((doneMilestones / totalMilestones) * 100) : 0;
+
+      // Try to get quick CRM stats
+      let crmQuick = null;
+      const config = getCRMConfig(company.slug);
+      if (config.url && config.apiKey) {
+        try {
+          const [summaryResult, healthResp] = await Promise.allSettled([
+            callCRM(company.slug, 'GET', '/metrics/data-summary'),
+            fetch(`${config.url}/api/health`, { signal: AbortSignal.timeout(3000) }),
+          ]);
+
+          const dataSummary = summaryResult.status === 'fulfilled' ? summaryResult.value?.data : null;
+          const healthOk = healthResp.status === 'fulfilled' ? healthResp.value?.ok : false;
+          const latency = healthResp.status === 'fulfilled' ? Date.now() : null;
+
+          crmQuick = {
+            healthy: healthOk,
+            openTickets: dataSummary?.tickets?.open ?? null,
+            users: dataSummary?.users ?? null,
+          };
+        } catch (e) {
+          crmQuick = { healthy: false, error: e.message };
+        }
+      }
+
+      // Try to get RAG stats via CRM proxy
+      let ragChunks = null;
+      if (config.url && config.apiKey) {
+        try {
+          const ragResult = await callCRM(company.slug, 'GET', '/rag/stats');
+          ragChunks = ragResult?.data?.total_chunks ?? null;
+        } catch (e) { /* ignore */ }
+      }
+
+      return {
+        ...company,
+        milestones: { total: totalMilestones, done: doneMilestones },
+        progress,
+        openDevTasks: devTaskCount?.count ?? 0,
+        crm: crmQuick,
+        ragChunks,
+      };
+    }));
+
+    res.json({ success: true, data: summaries });
+  } catch (err) {
+    console.error('Error fetching portfolio summary:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
