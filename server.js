@@ -3497,28 +3497,36 @@ app.post('/tools/:name', async (req, res) => {
 });
 
 app.post('/mcp', async (req, res) => {
-  const { method, params } = req.body;
+  const { jsonrpc, id, method, params } = req.body;
+  const rpcWrap = (result) => jsonrpc === '2.0' ? { jsonrpc: '2.0', id, result } : result;
+  const rpcError = (code, message) => jsonrpc === '2.0'
+    ? { jsonrpc: '2.0', id, error: { code, message } }
+    : { error: message };
   try {
     switch (method) {
       case 'initialize':
-        res.json({ protocolVersion: '2024-11-05', serverInfo: { name: 'project-tracker', version: '1.0.0' }, capabilities: { tools: {} } });
+        res.json(rpcWrap({ protocolVersion: '2024-11-05', serverInfo: { name: 'agentboxdev', version: '1.0.0' }, capabilities: { tools: {} } }));
+        break;
+      case 'notifications/initialized':
+        // Client acknowledgment — no response needed for notifications
+        res.status(204).end();
         break;
       case 'tools/list':
-        res.json({ tools });
+        res.json(rpcWrap({ tools }));
         break;
       case 'tools/call': {
         const { name, arguments: args } = params;
-        if (!handlers[name]) { res.status(404).json({ error: `Tool not found: ${name}` }); return; }
+        if (!handlers[name]) { res.json(rpcError(-32602, `Tool not found: ${name}`)); return; }
         const result = await handlers[name](args || {});
-        res.json({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
+        res.json(rpcWrap({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }));
         break;
       }
       default:
-        res.status(400).json({ error: `Unknown method: ${method}` });
+        res.json(rpcError(-32601, `Unknown method: ${method}`));
     }
   } catch (error) {
     console.error('MCP error:', error);
-    res.status(500).json({ error: error.message });
+    res.json(rpcError(-32603, error.message));
   }
 });
 
