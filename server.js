@@ -3496,7 +3496,7 @@ app.post('/upload', async (req, res) => {
 // Session tracking for MCP Streamable HTTP
 const mcpSessions = new Map(); // sessionId -> { created, lastUsed }
 function generateMcpSessionId() {
-  return 'mcp_' + require('crypto').randomUUID();
+  return 'mcp_' + crypto.randomUUID();
 }
 
 // GET /mcp — SSE stream endpoint (required by spec, used for server-initiated messages)
