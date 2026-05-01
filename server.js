@@ -7,6 +7,8 @@ import nodemailer from 'nodemailer';
 import Anthropic from '@anthropic-ai/sdk';
 import { google } from 'googleapis';
 import admin from 'firebase-admin';
+import { timingSafeEqual } from 'crypto';
+import { fileURLToPath } from 'url';
 
 // Firebase Admin SDK for AgentBox Dashboard user management
 if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
@@ -3118,6 +3120,523 @@ app.get('/api/github/repos', async (req, res) => {
   }
 });
 
+// ============ FEEDBACK-TASK MIRROR (chat-feedback Trello board sync) ============
+// Two-way sync between each tenant's CRM Task model and AgentBoxDashboard's
+// per-tenant kanban view. CRMBackend pushes change events to the webhook
+// endpoint here; the dashboard reads from MCP and writes back through the
+// proxy endpoints below (which call back into CRMBackend via callCRM).
+//
+// See: chat-feedback-mcp-sync-plan.md
+
+const VALID_TENANTS = new Set(['dtiq', 'qwilt', 'packetfabric', 'welink', 'element8', 'dev']);
+
+function getWebhookSecret(tenant) {
+  return process.env[`MCP_WEBHOOK_SECRET_${tenant.toUpperCase()}`];
+}
+
+function constantTimeEquals(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+function tenantFromQuery(req) {
+  const tenant = (req.query.tenant || '').toString().toLowerCase();
+  if (!VALID_TENANTS.has(tenant)) {
+    const err = new Error(`Invalid or missing 'tenant' query param. Valid: ${[...VALID_TENANTS].join(', ')}`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return tenant;
+}
+
+// Outbound call to a tenant CRMBackend authenticated with the feature-scoped
+// {TENANT}_TASK_CRM_MCP_API_KEY (separate from the legacy CRM_KEY_{TENANT}
+// used by callCRM elsewhere). Used by the feedback-tasks write proxies and
+// the backfill script. Handles 204 No Content as null.
+async function taskMcpCallCrm(tenant, method, path, body, extraHeaders = {}) {
+  const url = process.env[`CRM_URL_${tenant.toUpperCase()}`];
+  const apiKey = process.env[`${tenant.toUpperCase()}_TASK_CRM_MCP_API_KEY`];
+  if (!url) throw new Error(`No CRM_URL_${tenant.toUpperCase()} configured`);
+  if (!apiKey) throw new Error(`No ${tenant.toUpperCase()}_TASK_CRM_MCP_API_KEY configured`);
+
+  const headers = {
+    'X-Tenant-ID': tenant,
+    'X-Api-Key': apiKey,
+    ...extraHeaders,
+  };
+  if (body !== undefined && body !== null) headers['Content-Type'] = 'application/json';
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(`${url.replace(/\/$/, '')}/api${path}`, {
+      method,
+      headers,
+      body: body !== undefined && body !== null ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      throw new Error(errBody.message || `CRM ${tenant} returned HTTP ${resp.status}`);
+    }
+    if (resp.status === 204) return null;
+    return resp.json();
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`CRM ${tenant} request timed out`);
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Map a flat DB row → the shape the dashboard kanban components expect.
+// Mirrors CRMBackend's TASK_INCLUDE response shape so the copied components
+// can render mirror rows interchangeably with native CRMBackend rows.
+function rowToTaskShape(row) {
+  return {
+    id: row.id,
+    crmTaskId: row.crm_task_id,
+    title: row.title,
+    description: row.description || '',
+    type: row.type,
+    status: row.status,
+    priority: row.priority,
+    position: row.position,
+    closedAt: row.closed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    reporter: {
+      id: row.reporter_id,
+      displayName: row.reporter_name,
+      email: row.reporter_email,
+      photoURL: null,
+    },
+    assignee: row.assignee_id
+      ? { id: row.assignee_id, displayName: row.assignee_name, email: row.assignee_email, photoURL: null }
+      : null,
+    channel: {
+      id: row.channel_id,
+      name: row.channel_name,
+      slug: null,
+      feedbackType: row.channel_feedback_type,
+    },
+  };
+}
+
+function rowToCommentShape(row) {
+  return {
+    id: row.id,
+    crmCommentId: row.crm_comment_id,
+    content: row.content,
+    createdAt: row.created_at,
+    updatedAt: row.created_at,
+    author: {
+      id: row.author_id,
+      displayName: row.author_name,
+      email: row.author_email,
+      photoURL: null,
+    },
+  };
+}
+
+function rowToAttachmentShape(row) {
+  return {
+    id: row.id,
+    crmAttachmentId: row.crm_attachment_id,
+    fileName: row.file_name,
+    fileSize: Number(row.file_size),
+    mimeType: row.mime_type,
+    storageKey: null,
+    uploadedById: row.uploaded_by_id,
+    createdAt: row.created_at,
+    url: row.signed_url,
+  };
+}
+
+// Idempotent task upsert. Used by both the live webhook and the backfill script.
+async function upsertFeedbackTask(client, tenant, task) {
+  const reporter = task.reporter || {};
+  const assignee = task.assignee || {};
+  const channel = task.channel || {};
+  const sql = `
+    INSERT INTO mcp_feedback_tasks (
+      tenant, crm_task_id, title, description, type, status, priority, position,
+      reporter_id, reporter_name, reporter_email,
+      assignee_id, assignee_name, assignee_email,
+      channel_id, channel_name, channel_feedback_type,
+      closed_at, created_at, updated_at, synced_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20, NOW())
+    ON CONFLICT (tenant, crm_task_id) DO UPDATE SET
+      title = EXCLUDED.title,
+      description = EXCLUDED.description,
+      type = EXCLUDED.type,
+      status = EXCLUDED.status,
+      priority = EXCLUDED.priority,
+      position = EXCLUDED.position,
+      reporter_id = EXCLUDED.reporter_id,
+      reporter_name = EXCLUDED.reporter_name,
+      reporter_email = EXCLUDED.reporter_email,
+      assignee_id = EXCLUDED.assignee_id,
+      assignee_name = EXCLUDED.assignee_name,
+      assignee_email = EXCLUDED.assignee_email,
+      channel_id = EXCLUDED.channel_id,
+      channel_name = EXCLUDED.channel_name,
+      channel_feedback_type = EXCLUDED.channel_feedback_type,
+      closed_at = EXCLUDED.closed_at,
+      updated_at = EXCLUDED.updated_at,
+      synced_at = NOW()
+    RETURNING id`;
+  const params = [
+    tenant,
+    task.id,
+    task.title,
+    task.description || null,
+    task.type,
+    task.status,
+    task.priority,
+    task.position ?? 0,
+    reporter.id || null,
+    reporter.displayName || null,
+    reporter.email || null,
+    assignee.id || null,
+    assignee.displayName || null,
+    assignee.email || null,
+    channel.id || null,
+    channel.name || null,
+    channel.feedbackType || null,
+    task.closedAt || null,
+    task.createdAt || new Date().toISOString(),
+    task.updatedAt || new Date().toISOString(),
+  ];
+  const result = await client.query(sql, params);
+  return result.rows[0]?.id;
+}
+
+// Bulk-update sibling positions from a channelOrder snapshot. Catches drift
+// caused by Prisma updateMany() calls in CRMBackend (which shift sibling
+// positions silently during column moves and deletes).
+async function applyChannelOrder(client, tenant, channelOrder) {
+  if (!channelOrder?.tasks?.length) return;
+  for (const t of channelOrder.tasks) {
+    await client.query(
+      `UPDATE mcp_feedback_tasks
+         SET status = $3, position = $4, synced_at = NOW()
+       WHERE tenant = $1 AND crm_task_id = $2`,
+      [tenant, t.id, t.status, t.position],
+    );
+  }
+}
+
+async function upsertFeedbackComment(client, tenant, taskCrmId, comment) {
+  const author = comment.author || {};
+  const mirror = await queryOne(
+    `SELECT id FROM mcp_feedback_tasks WHERE tenant = $1 AND crm_task_id = $2`,
+    [tenant, taskCrmId],
+  );
+  if (!mirror) {
+    // Comment arrived before its parent task — skip and rely on backfill.
+    console.warn(`[feedback-tasks] comment ${comment.id} for unknown task ${taskCrmId} on ${tenant}`);
+    return;
+  }
+  await client.query(
+    `INSERT INTO mcp_feedback_comments (
+       tenant, crm_comment_id, mirror_task_id, crm_task_id,
+       author_id, author_name, author_email, content, created_at, synced_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, NOW())
+     ON CONFLICT (tenant, crm_comment_id) DO UPDATE SET
+       content = EXCLUDED.content,
+       synced_at = NOW()`,
+    [
+      tenant,
+      comment.id,
+      mirror.id,
+      taskCrmId,
+      author.id || null,
+      author.displayName || null,
+      author.email || null,
+      comment.content,
+      comment.createdAt || new Date().toISOString(),
+    ],
+  );
+}
+
+// CRMBackend's buildAttachmentUrl returns a path-only URL like
+// `/api/tasks/attachments/download?key=...&exp=...&sig=...`. The dashboard
+// renders these in <a href> / <img src>, so a relative URL gets resolved
+// against the dashboard's host (localhost:3003 / agentbox-dashboard...) and
+// 404s. Absolute-ize it against this tenant's CRM URL at upsert time so the
+// stored value always points back at the right CRMBackend.
+function absoluteizeAttachmentUrl(tenant, url) {
+  if (!url) return null;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  const base = process.env[`CRM_URL_${tenant.toUpperCase()}`];
+  if (!base) return url; // best-effort: leave relative if base unset (will surface 404 on click)
+  return `${base.replace(/\/$/, '')}${url.startsWith('/') ? '' : '/'}${url}`;
+}
+
+async function upsertFeedbackAttachment(client, tenant, taskCrmId, attachment) {
+  const mirror = await queryOne(
+    `SELECT id FROM mcp_feedback_tasks WHERE tenant = $1 AND crm_task_id = $2`,
+    [tenant, taskCrmId],
+  );
+  if (!mirror) {
+    console.warn(`[feedback-tasks] attachment ${attachment.id} for unknown task ${taskCrmId} on ${tenant}`);
+    return;
+  }
+  // Signed-URL TTL is ~1h on the CRM side. We store it for now and re-fetch
+  // task detail (which mints a fresh URL) when expired.
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  await client.query(
+    `INSERT INTO mcp_feedback_attachments (
+       tenant, crm_attachment_id, mirror_task_id, crm_task_id,
+       file_name, file_size, mime_type, signed_url, signed_url_expires_at,
+       uploaded_by_id, created_at, synced_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, NOW())
+     ON CONFLICT (tenant, crm_attachment_id) DO UPDATE SET
+       signed_url = EXCLUDED.signed_url,
+       signed_url_expires_at = EXCLUDED.signed_url_expires_at,
+       synced_at = NOW()`,
+    [
+      tenant,
+      attachment.id,
+      mirror.id,
+      taskCrmId,
+      attachment.fileName,
+      attachment.fileSize ?? 0,
+      attachment.mimeType || null,
+      absoluteizeAttachmentUrl(tenant, attachment.url),
+      expiresAt,
+      attachment.uploadedById || null,
+      attachment.createdAt || new Date().toISOString(),
+    ],
+  );
+}
+
+// Pull every task from a tenant's CRM (read-only against CRM) and reconcile
+// the mirror. Idempotent — same upsert path as the live webhook. Used by
+// (a) the manual "Sync from CRM" button on the dashboard, and (b) the
+// backfill script. Returns a summary so callers can surface counts.
+async function syncTenantFeedbackTasks(tenant) {
+  const allTasks = await taskMcpCallCrm(tenant, 'GET', '/tasks/all', null);
+  if (!Array.isArray(allTasks)) {
+    throw new Error(`Expected array from /api/tasks/all, got ${typeof allTasks}`);
+  }
+  let totalTasks = 0;
+  let totalComments = 0;
+  let totalAttachments = 0;
+
+  // Track which CRM IDs are still live so we can clean up mirror rows for
+  // tasks that were deleted in CRM while webhooks were down.
+  const liveCrmTaskIds = new Set();
+
+  const client = await pool.connect();
+  try {
+    for (const task of allTasks) {
+      liveCrmTaskIds.add(task.id);
+      try {
+        await upsertFeedbackTask(client, tenant, task);
+        totalTasks++;
+        const detail = await taskMcpCallCrm(tenant, 'GET', `/tasks/${task.id}`, null);
+        for (const comment of detail.comments || []) {
+          await upsertFeedbackComment(client, tenant, task.id, comment);
+          totalComments++;
+        }
+        for (const attachment of detail.attachments || []) {
+          await upsertFeedbackAttachment(client, tenant, task.id, attachment);
+          totalAttachments++;
+        }
+      } catch (err) {
+        console.error(`[sync ${tenant}] task ${task.id}: ${err.message}`);
+      }
+    }
+    // Drop mirror rows for tasks that no longer exist in CRM (cascades to
+    // their comments + attachments via FK).
+    let deleted = 0;
+    if (liveCrmTaskIds.size === 0) {
+      const r = await client.query(
+        `DELETE FROM mcp_feedback_tasks WHERE tenant = $1`,
+        [tenant],
+      );
+      deleted = r.rowCount;
+    } else {
+      const r = await client.query(
+        `DELETE FROM mcp_feedback_tasks
+          WHERE tenant = $1 AND crm_task_id NOT IN (${Array.from(liveCrmTaskIds, (_, i) => `$${i + 2}`).join(',')})`,
+        [tenant, ...liveCrmTaskIds],
+      );
+      deleted = r.rowCount;
+    }
+    return { tasks: totalTasks, comments: totalComments, attachments: totalAttachments, deletedTasks: deleted };
+  } finally {
+    client.release();
+  }
+}
+
+// Manual sync trigger. Dashboard's "Sync from CRM" button hits this when the
+// DA team wants to force-reconcile the mirror against CRM (in case of dropped
+// webhooks or just to feel safe). Idempotent: same end-state as the webhook
+// path, applied in one batch.
+app.post('/api/feedback-tasks/sync', async (req, res) => {
+  try {
+    const tenant = tenantFromQuery(req);
+    const summary = await syncTenantFeedbackTasks(tenant);
+    res.json({ tenant, ...summary });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Webhook intake from CRMBackend. Validates per-tenant secret, dispatches on
+// eventType, and replies 204 on success. Errors return 4xx/5xx so CRMBackend
+// can log them — but CRMBackend's TaskWebhookService treats this fire-and-
+// forget, so a non-200 won't block the user-facing CRM write.
+app.post('/api/feedback-tasks/webhook', async (req, res) => {
+  try {
+    const tenant = (req.headers['x-tenant-id'] || '').toString().toLowerCase();
+    if (!VALID_TENANTS.has(tenant)) {
+      return res.status(400).json({ error: `Invalid tenant: ${tenant}` });
+    }
+
+    const provided = (req.headers['x-webhook-secret'] || '').toString();
+    const expected = getWebhookSecret(tenant);
+    if (!expected) {
+      console.error(`[feedback-tasks/webhook] no MCP_WEBHOOK_SECRET_${tenant.toUpperCase()} configured`);
+      return res.status(500).json({ error: 'Webhook secret not configured for tenant' });
+    }
+    if (!constantTimeEquals(provided, expected)) {
+      return res.status(401).json({ error: 'Invalid webhook secret' });
+    }
+
+    const { eventType, data } = req.body || {};
+    if (!eventType || !data) {
+      return res.status(400).json({ error: 'Missing eventType or data' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      switch (eventType) {
+        case 'task.created':
+        case 'task.updated': {
+          if (!data.task) throw new Error(`${eventType} missing data.task`);
+          await upsertFeedbackTask(client, tenant, data.task);
+          if (data.channelOrder) await applyChannelOrder(client, tenant, data.channelOrder);
+          break;
+        }
+        case 'task.deleted': {
+          if (!data.taskId) throw new Error('task.deleted missing data.taskId');
+          await client.query(
+            `DELETE FROM mcp_feedback_tasks WHERE tenant = $1 AND crm_task_id = $2`,
+            [tenant, data.taskId],
+          );
+          if (data.channelOrder) await applyChannelOrder(client, tenant, data.channelOrder);
+          break;
+        }
+        case 'task.comment.added': {
+          if (!data.taskId || !data.comment) throw new Error('task.comment.added missing data');
+          await upsertFeedbackComment(client, tenant, data.taskId, data.comment);
+          break;
+        }
+        case 'task.comment.deleted': {
+          if (!data.commentId) throw new Error('task.comment.deleted missing data.commentId');
+          await client.query(
+            `DELETE FROM mcp_feedback_comments WHERE tenant = $1 AND crm_comment_id = $2`,
+            [tenant, data.commentId],
+          );
+          break;
+        }
+        case 'task.attachment.added': {
+          if (!data.taskId || !data.attachment) throw new Error('task.attachment.added missing data');
+          await upsertFeedbackAttachment(client, tenant, data.taskId, data.attachment);
+          break;
+        }
+        case 'task.attachment.deleted': {
+          if (!data.attachmentId) throw new Error('task.attachment.deleted missing data.attachmentId');
+          await client.query(
+            `DELETE FROM mcp_feedback_attachments WHERE tenant = $1 AND crm_attachment_id = $2`,
+            [tenant, data.attachmentId],
+          );
+          break;
+        }
+        default:
+          throw new Error(`Unknown eventType: ${eventType}`);
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.status(204).send();
+  } catch (err) {
+    console.error('[feedback-tasks/webhook]', err);
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Read: kanban board for one tenant, grouped by status. Each task includes
+// _count.{comments,attachments} so cards can render badge counts without a
+// follow-up request. Full attachments array is served only in the detail
+// endpoint to keep the list response lean.
+app.get('/api/feedback-tasks', async (req, res) => {
+  try {
+    const tenant = tenantFromQuery(req);
+    const rows = await query(
+      `SELECT t.*,
+              (SELECT COUNT(*)::int FROM mcp_feedback_comments c WHERE c.mirror_task_id = t.id) AS comments_count,
+              (SELECT COUNT(*)::int FROM mcp_feedback_attachments a WHERE a.mirror_task_id = t.id) AS attachments_count
+         FROM mcp_feedback_tasks t
+        WHERE t.tenant = $1
+        ORDER BY t.status ASC, t.position ASC, t.created_at ASC`,
+      [tenant],
+    );
+    const tasks = rows.map((row) => {
+      const task = rowToTaskShape(row);
+      task._count = { comments: row.comments_count || 0, attachments: row.attachments_count || 0 };
+      task.attachments = [];
+      return task;
+    });
+    res.json({
+      tenant,
+      columns: {
+        todo: tasks.filter((t) => t.status === 'todo'),
+        in_progress: tasks.filter((t) => t.status === 'in_progress'),
+        done: tasks.filter((t) => t.status === 'done'),
+      },
+    });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Per-tenant counts for the tab badges. Single query, group by tenant + status.
+app.get('/api/feedback-tasks/tenants/summary', async (_req, res) => {
+  try {
+    const rows = await query(
+      `SELECT tenant, status, COUNT(*)::int AS n
+         FROM mcp_feedback_tasks
+        GROUP BY tenant, status`,
+    );
+    const summary = {};
+    for (const t of VALID_TENANTS) summary[t] = { todo: 0, in_progress: 0, done: 0, open: 0 };
+    for (const row of rows) {
+      if (!summary[row.tenant]) summary[row.tenant] = { todo: 0, in_progress: 0, done: 0, open: 0 };
+      summary[row.tenant][row.status] = row.n;
+    }
+    for (const t of Object.keys(summary)) {
+      summary[t].open = summary[t].todo + summary[t].in_progress;
+    }
+    res.json({ summary });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/github/commits', async (req, res) => {
   try {
     const result = await handlers.github_list_commits({
@@ -3155,6 +3674,124 @@ app.get('/api/github/activity', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Read: single task detail with comments + attachments.
+app.get('/api/feedback-tasks/:crmTaskId', async (req, res) => {
+  try {
+    const tenant = tenantFromQuery(req);
+    const { crmTaskId } = req.params;
+    const taskRow = await queryOne(
+      `SELECT * FROM mcp_feedback_tasks WHERE tenant = $1 AND crm_task_id = $2`,
+      [tenant, crmTaskId],
+    );
+    if (!taskRow) return res.status(404).json({ error: 'Task not found in mirror' });
+
+    const [commentRows, attachmentRows] = await Promise.all([
+      query(
+        `SELECT * FROM mcp_feedback_comments WHERE mirror_task_id = $1 ORDER BY created_at ASC`,
+        [taskRow.id],
+      ),
+      query(
+        `SELECT * FROM mcp_feedback_attachments WHERE mirror_task_id = $1 ORDER BY created_at ASC`,
+        [taskRow.id],
+      ),
+    ]);
+
+    const task = rowToTaskShape(taskRow);
+    task.comments = commentRows.map(rowToCommentShape);
+    task.attachments = attachmentRows.map(rowToAttachmentShape);
+    res.json(task);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Write proxy: dashboard PATCH → MCP → tenant CRMBackend PATCH /api/tasks/:id
+// On success, optimistically update the local mirror so the dashboard's
+// next read shows the change immediately, without depending on the
+// CRM→MCP webhook landing in time. The webhook still arrives later as an
+// idempotent confirmation (ON CONFLICT DO UPDATE).
+app.patch('/api/feedback-tasks/:crmTaskId', async (req, res) => {
+  try {
+    const tenant = tenantFromQuery(req);
+    const { crmTaskId } = req.params;
+    const result = await taskMcpCallCrm(tenant, 'PATCH', `/tasks/${crmTaskId}`, req.body);
+    if (result?.id) {
+      const client = await pool.connect();
+      try {
+        await upsertFeedbackTask(client, tenant, result);
+      } catch (err) {
+        console.warn('[feedback-tasks] optimistic mirror update (PATCH) failed:', err.message);
+      } finally {
+        client.release();
+      }
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Write proxy: dashboard comment → MCP → tenant CRMBackend POST /api/tasks/:id/comments
+// Forwards X-Acting-User-Email so CRMBackend can attribute the comment to the
+// real DA team member instead of the generic service-account user. On success,
+// optimistically inserts the comment into the mirror so the parent board's
+// `_count.comments` reflects it on the very next list read.
+app.post('/api/feedback-tasks/:crmTaskId/comments', async (req, res) => {
+  try {
+    const tenant = tenantFromQuery(req);
+    const { crmTaskId } = req.params;
+    const extraHeaders = {};
+    const actingEmail = req.headers['x-acting-user-email'];
+    if (actingEmail) extraHeaders['X-Acting-User-Email'] = actingEmail;
+    const result = await taskMcpCallCrm(tenant, 'POST', `/tasks/${crmTaskId}/comments`, req.body, extraHeaders);
+    if (result?.id) {
+      const client = await pool.connect();
+      try {
+        await upsertFeedbackComment(client, tenant, crmTaskId, result);
+      } catch (err) {
+        console.warn('[feedback-tasks] optimistic mirror update (comment) failed:', err.message);
+      } finally {
+        client.release();
+      }
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Write proxy: dashboard delete → MCP → tenant CRMBackend DELETE /api/tasks/:id
+// On success, optimistically delete from the mirror.
+app.delete('/api/feedback-tasks/:crmTaskId', async (req, res) => {
+  try {
+    const tenant = tenantFromQuery(req);
+    const { crmTaskId } = req.params;
+    await taskMcpCallCrm(tenant, 'DELETE', `/tasks/${crmTaskId}`, null);
+    try {
+      await pool.query(
+        `DELETE FROM mcp_feedback_tasks WHERE tenant = $1 AND crm_task_id = $2`,
+        [tenant, crmTaskId],
+      );
+    } catch (err) {
+      console.warn('[feedback-tasks] optimistic mirror delete failed:', err.message);
+    }
+    res.status(204).send();
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Expose the feedback-task helpers for the backfill script.
+export {
+  upsertFeedbackTask,
+  upsertFeedbackComment,
+  upsertFeedbackAttachment,
+  applyChannelOrder,
+  taskMcpCallCrm,
+  syncTenantFeedbackTasks,
+  pool as feedbackTasksPool,
+};
 
 // ============ DASHBOARD USER MANAGEMENT (Firebase Admin) ============
 
@@ -3788,7 +4425,13 @@ app.get('/api/portfolio-summary', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`MCP Project Tracker running on port ${PORT}`);
-});
+// Only start the HTTP server when run directly (`node server.js`). When this
+// module is imported by other scripts (e.g. the feedback-tasks backfill) we
+// just want the helper exports — no listening port.
+const isMainModule = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMainModule) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`MCP Project Tracker running on port ${PORT}`);
+  });
+}
