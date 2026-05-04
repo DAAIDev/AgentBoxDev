@@ -3434,19 +3434,58 @@ async function syncTenantFeedbackTasks(tenant) {
 
   const client = await pool.connect();
   try {
+    let deletedComments = 0;
+    let deletedAttachments = 0;
     for (const task of allTasks) {
       liveCrmTaskIds.add(task.id);
       try {
         await upsertFeedbackTask(client, tenant, task);
         totalTasks++;
         const detail = await taskMcpCallCrm(tenant, 'GET', `/tasks/${task.id}`, null);
+        const liveCommentIds = [];
         for (const comment of detail.comments || []) {
           await upsertFeedbackComment(client, tenant, task.id, comment);
+          liveCommentIds.push(comment.id);
           totalComments++;
         }
+        const liveAttachmentIds = [];
         for (const attachment of detail.attachments || []) {
           await upsertFeedbackAttachment(client, tenant, task.id, attachment);
+          liveAttachmentIds.push(attachment.id);
           totalAttachments++;
+        }
+        // Drop mirror rows for comments/attachments that no longer exist on this
+        // task in CRM. Catches deletes whose webhooks got dropped — without this
+        // pass, manual sync only reconciles task-level deletions.
+        if (liveCommentIds.length === 0) {
+          const r = await client.query(
+            `DELETE FROM mcp_feedback_comments WHERE tenant = $1 AND crm_task_id = $2`,
+            [tenant, task.id],
+          );
+          deletedComments += r.rowCount;
+        } else {
+          const placeholders = liveCommentIds.map((_, i) => `$${i + 3}`).join(',');
+          const r = await client.query(
+            `DELETE FROM mcp_feedback_comments
+              WHERE tenant = $1 AND crm_task_id = $2 AND crm_comment_id NOT IN (${placeholders})`,
+            [tenant, task.id, ...liveCommentIds],
+          );
+          deletedComments += r.rowCount;
+        }
+        if (liveAttachmentIds.length === 0) {
+          const r = await client.query(
+            `DELETE FROM mcp_feedback_attachments WHERE tenant = $1 AND crm_task_id = $2`,
+            [tenant, task.id],
+          );
+          deletedAttachments += r.rowCount;
+        } else {
+          const placeholders = liveAttachmentIds.map((_, i) => `$${i + 3}`).join(',');
+          const r = await client.query(
+            `DELETE FROM mcp_feedback_attachments
+              WHERE tenant = $1 AND crm_task_id = $2 AND crm_attachment_id NOT IN (${placeholders})`,
+            [tenant, task.id, ...liveAttachmentIds],
+          );
+          deletedAttachments += r.rowCount;
         }
       } catch (err) {
         console.error(`[sync ${tenant}] task ${task.id}: ${err.message}`);
@@ -3469,7 +3508,14 @@ async function syncTenantFeedbackTasks(tenant) {
       );
       deleted = r.rowCount;
     }
-    return { tasks: totalTasks, comments: totalComments, attachments: totalAttachments, deletedTasks: deleted };
+    return {
+      tasks: totalTasks,
+      comments: totalComments,
+      attachments: totalAttachments,
+      deletedTasks: deleted,
+      deletedComments,
+      deletedAttachments,
+    };
   } finally {
     client.release();
   }
