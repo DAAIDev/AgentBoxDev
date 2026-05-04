@@ -238,6 +238,79 @@ CREATE TABLE IF NOT EXISTS autofix_runs (
 -- ALTER TABLE error_triage ADD CONSTRAINT fk_autofix_run FOREIGN KEY (autofix_run_id) REFERENCES autofix_runs(id) ON DELETE SET NULL;
 -- Run manually if needed; CREATE TABLE IF NOT EXISTS won't re-add constraints.
 
+-- ============================================
+-- MCP Feedback-Task Mirror (synced from each tenant CRM)
+-- ============================================
+-- Each row mirrors a row in a tenant CRM's Task / TaskComment / TaskAttachment
+-- table. Source of truth lives in the per-tenant CRM database; these tables
+-- are an eventually-consistent read-side cache populated by webhooks from
+-- CRMBackend (POST /api/feedback-tasks/webhook).
+--
+-- Identity:
+--   - `id` is the mirror's own UUID, used for FK joins between mirror tables
+--   - `crm_*_id` is the source-of-truth ID from the tenant CRM (cuid string)
+--   - `(tenant, crm_*_id)` is unique so webhook upserts stay idempotent
+--   - Cross-system traces: "is mirror row X in sync with CRM row Y?" lookup
+--     uses (tenant, crm_*_id) — every row carries a visible breadcrumb back
+--     to its CRM source.
+CREATE TABLE IF NOT EXISTS mcp_feedback_tasks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant TEXT NOT NULL,
+  crm_task_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'todo',
+  priority TEXT NOT NULL DEFAULT 'medium',
+  position INT NOT NULL DEFAULT 0,
+  reporter_id TEXT,
+  reporter_name TEXT,
+  reporter_email TEXT,
+  assignee_id TEXT,
+  assignee_name TEXT,
+  assignee_email TEXT,
+  channel_id TEXT NOT NULL,
+  channel_name TEXT,
+  channel_feedback_type TEXT,
+  closed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT mcp_feedback_tasks_tenant_crm_task_unique UNIQUE (tenant, crm_task_id)
+);
+
+CREATE TABLE IF NOT EXISTS mcp_feedback_comments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant TEXT NOT NULL,
+  crm_comment_id TEXT NOT NULL,
+  mirror_task_id UUID NOT NULL REFERENCES mcp_feedback_tasks(id) ON DELETE CASCADE,
+  crm_task_id TEXT NOT NULL,
+  author_id TEXT,
+  author_name TEXT,
+  author_email TEXT,
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT mcp_feedback_comments_tenant_crm_comment_unique UNIQUE (tenant, crm_comment_id)
+);
+
+CREATE TABLE IF NOT EXISTS mcp_feedback_attachments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant TEXT NOT NULL,
+  crm_attachment_id TEXT NOT NULL,
+  mirror_task_id UUID NOT NULL REFERENCES mcp_feedback_tasks(id) ON DELETE CASCADE,
+  crm_task_id TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  file_size BIGINT NOT NULL DEFAULT 0,
+  mime_type TEXT,
+  signed_url TEXT,
+  signed_url_expires_at TIMESTAMPTZ,
+  uploaded_by_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL,
+  synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT mcp_feedback_attachments_tenant_crm_att_unique UNIQUE (tenant, crm_attachment_id)
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_admin_requests_type ON admin_requests(type);
 CREATE INDEX IF NOT EXISTS idx_admin_requests_status ON admin_requests(status);
@@ -349,3 +422,9 @@ CREATE TABLE IF NOT EXISTS project_context (
 CREATE INDEX IF NOT EXISTS idx_pc_repo ON project_context(repo);
 CREATE INDEX IF NOT EXISTS idx_pc_area ON project_context(repo, area);
 CREATE INDEX IF NOT EXISTS idx_pc_status ON project_context(status);
+
+-- MCP Feedback-Task Mirror indexes
+CREATE INDEX IF NOT EXISTS idx_mcp_feedback_tasks_tenant ON mcp_feedback_tasks(tenant);
+CREATE INDEX IF NOT EXISTS idx_mcp_feedback_tasks_tenant_status_position ON mcp_feedback_tasks(tenant, status, position);
+CREATE INDEX IF NOT EXISTS idx_mcp_feedback_comments_mirror_task ON mcp_feedback_comments(mirror_task_id);
+CREATE INDEX IF NOT EXISTS idx_mcp_feedback_attachments_mirror_task ON mcp_feedback_attachments(mirror_task_id);
