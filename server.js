@@ -9,6 +9,7 @@ import { google } from 'googleapis';
 import admin from 'firebase-admin';
 import { timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
+import { createKanbanGithubSync } from './kanban-github-sync.mjs';
 
 // Firebase Admin SDK for AgentBox Dashboard user management
 if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
@@ -2964,6 +2965,18 @@ const handlers = {
   }
 };
 
+// ============ KANBAN → GITHUB ISSUES SYNC ============
+// Fired from /api/feedback-tasks/webhook below. Auto-classifies each kanban
+// task into CRMBackend or CRMFrontEnd via Haiku 4.5, then creates a GitHub
+// issue with tenant prefix in the title and routing reasoning in the body.
+const kanbanGithubSync = createKanbanGithubSync({
+  pool,
+  anthropic,
+  handlers,
+  callGitHub,
+  githubOrg: GITHUB_ORG,
+});
+
 // ============ CRM INSTANCE REST API ============
 
 // List all configured CRM instances
@@ -3596,6 +3609,26 @@ app.post('/api/feedback-tasks/sync', async (req, res) => {
   }
 });
 
+// One-shot backfill: push every pending non-done kanban task for a tenant into
+// GitHub Issues. Runs sequentially (avoid Anthropic + GitHub rate-limit bursts).
+// Query params:
+//   tenant         (required)  — qwilt, packetfabric, etc.
+//   retry_failed   (optional)  — '1'/'true' to also retry rows in 'failed' state
+//   dry_run        (optional)  — '1'/'true' to return the candidate list without firing
+//   limit          (optional)  — max rows to process (default 200)
+app.post('/api/feedback-tasks/push-to-github', async (req, res) => {
+  try {
+    const tenant = tenantFromQuery(req);
+    const retryFailed = ['1', 'true', 'yes'].includes(String(req.query.retry_failed || '').toLowerCase());
+    const dryRun = ['1', 'true', 'yes'].includes(String(req.query.dry_run || '').toLowerCase());
+    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
+    const summary = await kanbanGithubSync.backfillTenant({ tenant, retryFailed, dryRun, limit });
+    res.json(summary);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
 // Webhook intake from CRMBackend. Validates per-tenant secret, dispatches on
 // eventType, and replies 204 on success. Errors return 4xx/5xx so CRMBackend
 // can log them — but CRMBackend's TaskWebhookService treats this fire-and-
@@ -3620,6 +3653,19 @@ app.post('/api/feedback-tasks/webhook', async (req, res) => {
     const { eventType, data } = req.body || {};
     if (!eventType || !data) {
       return res.status(400).json({ error: 'Missing eventType or data' });
+    }
+
+    // Pre-read prior state so we can detect status transitions for the
+    // GitHub-Issues sync after the transaction commits. Cheap indexed lookup.
+    let prevState = null;
+    if ((eventType === 'task.created' || eventType === 'task.updated') && data.task?.id) {
+      const pre = await pool.query(
+        `SELECT status, github_issue_number
+           FROM mcp_feedback_tasks
+          WHERE tenant = $1 AND crm_task_id = $2`,
+        [tenant, data.task.id],
+      );
+      prevState = pre.rows[0] || null;
     }
 
     const client = await pool.connect();
@@ -3677,6 +3723,37 @@ app.post('/api/feedback-tasks/webhook', async (req, res) => {
       throw err;
     } finally {
       client.release();
+    }
+
+    // Fire-and-forget GitHub Issues sync after the mirror is committed. The
+    // tenant CRMBackend webhook caller already treats this fire-and-forget,
+    // so we never block the user-facing CRM write on classifier or GH latency.
+    if (eventType === 'task.created' || eventType === 'task.updated') {
+      const crmTaskId = data.task?.id;
+      const newStatus = data.task?.status;
+      if (crmTaskId) {
+        if (!prevState?.github_issue_number) {
+          // No issue yet — try to create one. The claim-pattern UPDATE inside
+          // pushKanbanTaskToGitHub is idempotent: skip-if-issued, skip-if-done.
+          setImmediate(() => {
+            kanbanGithubSync
+              .pushKanbanTaskToGitHub({ tenant, crmTaskId })
+              .catch((err) => console.error('[kanban-gh-sync] push error:', err));
+          });
+        } else if (
+          eventType === 'task.updated' &&
+          prevState?.status !== 'done' &&
+          newStatus === 'done'
+        ) {
+          // Existing issue, kanban moved to done — comment + status:done label.
+          // Issue stays open per product decision.
+          setImmediate(() => {
+            kanbanGithubSync
+              .commentDoneOnGitHub({ tenant, crmTaskId })
+              .catch((err) => console.error('[kanban-gh-sync] commentDone error:', err));
+          });
+        }
+      }
     }
 
     res.status(204).send();
