@@ -177,14 +177,16 @@ async function callCRM(company, method, path, body) {
 // ============ GITHUB API HELPER ============
 const GITHUB_ORG = process.env.GITHUB_ORG || 'DAAITeam';
 
-async function callGitHub(path, params = {}) {
+async function callGitHub(path, params = {}, { method = 'GET', body } = {}) {
   if (!process.env.GITHUB_TOKEN) {
     throw new Error('GITHUB_TOKEN not configured');
   }
 
   const url = new URL(`https://api.github.com${path}`);
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+  if (method === 'GET') {
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+    }
   }
 
   const controller = new AbortController();
@@ -192,11 +194,14 @@ async function callGitHub(path, params = {}) {
 
   try {
     const resp = await fetch(url.toString(), {
+      method,
       headers: {
         'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
         'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -205,6 +210,7 @@ async function callGitHub(path, params = {}) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.message || `GitHub API returned HTTP ${resp.status}`);
     }
+    if (resp.status === 204) return null;
     return resp.json();
   } catch (err) {
     clearTimeout(timeout);
@@ -962,6 +968,29 @@ const tools = [
         days: { type: "number", description: "Look-back window in days (default: 7, max: 30)" }
       },
       required: []
+    }
+  },
+  {
+    name: "create_github_issue",
+    description: "Create a GitHub issue in a DAAITeam repo. Used by the chat-feedback → GitHub Issues pipeline.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "Repository name within the DAAITeam org (e.g. 'CRMBackend', 'CRMFrontEnd')" },
+        title: { type: "string", description: "Issue title" },
+        body: { type: "string", description: "Issue body in GitHub-flavored markdown" },
+        labels: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional label names to apply (must already exist on the repo)"
+        },
+        assignees: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional GitHub usernames to assign"
+        }
+      },
+      required: ["repo", "title"]
     }
   },
   {
@@ -2299,6 +2328,38 @@ const handlers = {
       total_open_prs: totalOpenPRs,
       active_repos: activeRepos,
       top_contributors: topContributors,
+    };
+  },
+
+  async create_github_issue({ repo, title, body, labels, assignees }) {
+    if (!repo || typeof repo !== 'string') {
+      throw new Error('repo is required');
+    }
+    if (!title || typeof title !== 'string') {
+      throw new Error('title is required');
+    }
+
+    const payload = { title };
+    if (body !== undefined && body !== null) payload.body = body;
+    if (Array.isArray(labels) && labels.length > 0) payload.labels = labels;
+    if (Array.isArray(assignees) && assignees.length > 0) payload.assignees = assignees;
+
+    const issue = await callGitHub(
+      `/repos/${GITHUB_ORG}/${repo}/issues`,
+      {},
+      { method: 'POST', body: payload },
+    );
+
+    return {
+      number: issue.number,
+      url: issue.html_url,
+      api_url: issue.url,
+      state: issue.state,
+      title: issue.title,
+      labels: (issue.labels || []).map(l => (typeof l === 'string' ? l : l.name)),
+      assignees: (issue.assignees || []).map(a => a.login),
+      created_at: issue.created_at,
+      repo,
     };
   },
 
@@ -3718,6 +3779,17 @@ app.get('/api/github/activity', async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/github/issues', async (req, res) => {
+  try {
+    const { repo, title, body, labels, assignees } = req.body || {};
+    const result = await handlers.create_github_issue({ repo, title, body, labels, assignees });
+    res.status(201).json(result);
+  } catch (err) {
+    const status = /required/i.test(err.message) ? 400 : 500;
+    res.status(status).json({ error: err.message });
   }
 });
 
