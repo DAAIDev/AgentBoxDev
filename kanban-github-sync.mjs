@@ -243,16 +243,25 @@ export function createKanbanGithubSync({ pool, anthropic, handlers, callGitHub, 
 
   async function commentDoneOnGitHub({ tenant, crmTaskId }) {
     const result = await pool.query(
-      `SELECT github_issue_number, github_issue_repo, status
+      `SELECT github_issue_number, github_issue_repo, status, github_done_commented_at
          FROM mcp_feedback_tasks
         WHERE tenant = $1 AND crm_task_id = $2`,
       [tenant, crmTaskId],
     );
     if (result.rowCount === 0) return { skipped: true, reason: 'row_missing' };
 
-    const { github_issue_number: issueNumber, github_issue_repo: repo, status } = result.rows[0];
+    const {
+      github_issue_number: issueNumber,
+      github_issue_repo: repo,
+      status,
+      github_done_commented_at: alreadyCommented,
+    } = result.rows[0];
     if (!issueNumber || !repo) return { skipped: true, reason: 'no_issue_yet' };
     if (status !== 'done') return { skipped: true, reason: 'not_done' };
+    // Guard against re-comment if a card flips done → not_done → done. The
+    // first done-comment stamps github_done_commented_at; subsequent flips
+    // short-circuit here so we don't litter the issue.
+    if (alreadyCommented) return { skipped: true, reason: 'already_commented_done' };
 
     try {
       await callGitHub(
@@ -267,6 +276,12 @@ export function createKanbanGithubSync({ pool, anthropic, handlers, callGitHub, 
         `/repos/${githubOrg}/${repo}/issues/${issueNumber}/labels`,
         {},
         { method: 'POST', body: { labels: ['status:done'] } },
+      );
+      await pool.query(
+        `UPDATE mcp_feedback_tasks
+            SET github_done_commented_at = NOW()
+          WHERE tenant = $1 AND crm_task_id = $2`,
+        [tenant, crmTaskId],
       );
       logger.log(`[kanban-gh-sync] ${tenant}/${crmTaskId} → commented done on ${repo}#${issueNumber}`);
       return { commented: true, issueNumber, repo };
