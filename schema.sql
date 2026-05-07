@@ -276,6 +276,22 @@ CREATE TABLE IF NOT EXISTS mcp_feedback_tasks (
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  -- GitHub Issues sync (auto-fired by chat-feedback → GH Issues pipeline).
+  -- Issue is left open even after the kanban card moves to 'done'; a comment
+  -- + 'status:done' label gets posted instead.
+  github_issue_number  INT,
+  github_issue_url     TEXT,
+  github_issue_repo    TEXT,
+  github_sync_status   TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (github_sync_status IN ('pending', 'synced', 'failed', 'skipped')),
+  github_sync_error    TEXT,
+  github_synced_at     TIMESTAMPTZ,
+  github_done_commented_at TIMESTAMPTZ,
+  classified_repo      TEXT,
+  classifier_confidence REAL,
+  classifier_reasoning TEXT,
+
   CONSTRAINT mcp_feedback_tasks_tenant_crm_task_unique UNIQUE (tenant, crm_task_id)
 );
 
@@ -428,3 +444,33 @@ CREATE INDEX IF NOT EXISTS idx_mcp_feedback_tasks_tenant ON mcp_feedback_tasks(t
 CREATE INDEX IF NOT EXISTS idx_mcp_feedback_tasks_tenant_status_position ON mcp_feedback_tasks(tenant, status, position);
 CREATE INDEX IF NOT EXISTS idx_mcp_feedback_comments_mirror_task ON mcp_feedback_comments(mirror_task_id);
 CREATE INDEX IF NOT EXISTS idx_mcp_feedback_attachments_mirror_task ON mcp_feedback_attachments(mirror_task_id);
+
+-- ============================================
+-- Migrations for live DBs (additive, idempotent)
+-- ============================================
+-- Re-run schema.sql on existing deployments. Each ALTER is IF NOT EXISTS so
+-- a fresh DB created from the CREATE TABLE blocks above is unaffected.
+
+-- 2026-05-06 — chat-feedback → GitHub Issues sync columns
+ALTER TABLE mcp_feedback_tasks ADD COLUMN IF NOT EXISTS github_issue_number  INT;
+ALTER TABLE mcp_feedback_tasks ADD COLUMN IF NOT EXISTS github_issue_url     TEXT;
+ALTER TABLE mcp_feedback_tasks ADD COLUMN IF NOT EXISTS github_issue_repo    TEXT;
+ALTER TABLE mcp_feedback_tasks ADD COLUMN IF NOT EXISTS github_sync_status   TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE mcp_feedback_tasks ADD COLUMN IF NOT EXISTS github_sync_error    TEXT;
+ALTER TABLE mcp_feedback_tasks ADD COLUMN IF NOT EXISTS github_synced_at     TIMESTAMPTZ;
+ALTER TABLE mcp_feedback_tasks ADD COLUMN IF NOT EXISTS github_done_commented_at TIMESTAMPTZ;
+ALTER TABLE mcp_feedback_tasks ADD COLUMN IF NOT EXISTS classified_repo      TEXT;
+ALTER TABLE mcp_feedback_tasks ADD COLUMN IF NOT EXISTS classifier_confidence REAL;
+ALTER TABLE mcp_feedback_tasks ADD COLUMN IF NOT EXISTS classifier_reasoning TEXT;
+
+-- Mirror the CHECK constraint inline on the CREATE TABLE column definition
+-- onto live DBs that took the ALTER path. DROP IF EXISTS keeps the block
+-- re-runnable.
+ALTER TABLE mcp_feedback_tasks DROP CONSTRAINT IF EXISTS mcp_feedback_tasks_github_sync_status_check;
+ALTER TABLE mcp_feedback_tasks ADD CONSTRAINT mcp_feedback_tasks_github_sync_status_check
+  CHECK (github_sync_status IN ('pending', 'synced', 'failed', 'skipped'));
+
+-- Backfill query support: rows still needing a GH issue (not done, no issue yet).
+CREATE INDEX IF NOT EXISTS idx_feedback_tasks_gh_pending
+  ON mcp_feedback_tasks(tenant, github_sync_status)
+  WHERE github_issue_number IS NULL AND status <> 'done';

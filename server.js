@@ -9,6 +9,7 @@ import { google } from 'googleapis';
 import admin from 'firebase-admin';
 import { timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
+import { createKanbanGithubSync } from './kanban-github-sync.mjs';
 
 // Firebase Admin SDK for AgentBox Dashboard user management
 if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
@@ -177,14 +178,16 @@ async function callCRM(company, method, path, body) {
 // ============ GITHUB API HELPER ============
 const GITHUB_ORG = process.env.GITHUB_ORG || 'DAAITeam';
 
-async function callGitHub(path, params = {}) {
+async function callGitHub(path, params = {}, { method = 'GET', body } = {}) {
   if (!process.env.GITHUB_TOKEN) {
     throw new Error('GITHUB_TOKEN not configured');
   }
 
   const url = new URL(`https://api.github.com${path}`);
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+  if (method === 'GET') {
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+    }
   }
 
   const controller = new AbortController();
@@ -192,11 +195,14 @@ async function callGitHub(path, params = {}) {
 
   try {
     const resp = await fetch(url.toString(), {
+      method,
       headers: {
         'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
         'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -205,6 +211,7 @@ async function callGitHub(path, params = {}) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.message || `GitHub API returned HTTP ${resp.status}`);
     }
+    if (resp.status === 204) return null;
     return resp.json();
   } catch (err) {
     clearTimeout(timeout);
@@ -962,6 +969,29 @@ const tools = [
         days: { type: "number", description: "Look-back window in days (default: 7, max: 30)" }
       },
       required: []
+    }
+  },
+  {
+    name: "create_github_issue",
+    description: "Create a GitHub issue in a DAAITeam repo. Used by the chat-feedback → GitHub Issues pipeline.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "Repository name within the DAAITeam org (e.g. 'CRMBackend', 'CRMFrontEnd')" },
+        title: { type: "string", description: "Issue title" },
+        body: { type: "string", description: "Issue body in GitHub-flavored markdown" },
+        labels: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional label names to apply (must already exist on the repo)"
+        },
+        assignees: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional GitHub usernames to assign"
+        }
+      },
+      required: ["repo", "title"]
     }
   },
   {
@@ -2302,6 +2332,38 @@ const handlers = {
     };
   },
 
+  async create_github_issue({ repo, title, body, labels, assignees }) {
+    if (!repo || typeof repo !== 'string') {
+      throw new Error('repo is required');
+    }
+    if (!title || typeof title !== 'string') {
+      throw new Error('title is required');
+    }
+
+    const payload = { title };
+    if (body !== undefined && body !== null) payload.body = body;
+    if (Array.isArray(labels) && labels.length > 0) payload.labels = labels;
+    if (Array.isArray(assignees) && assignees.length > 0) payload.assignees = assignees;
+
+    const issue = await callGitHub(
+      `/repos/${GITHUB_ORG}/${repo}/issues`,
+      {},
+      { method: 'POST', body: payload },
+    );
+
+    return {
+      number: issue.number,
+      url: issue.html_url,
+      api_url: issue.url,
+      state: issue.state,
+      title: issue.title,
+      labels: (issue.labels || []).map(l => (typeof l === 'string' ? l : l.name)),
+      assignees: (issue.assignees || []).map(a => a.login),
+      created_at: issue.created_at,
+      repo,
+    };
+  },
+
   // ============ GCP CLOUD RUN MONITORING HANDLERS ============
 
   async get_cloudrun_service_info({ tenant }) {
@@ -2902,6 +2964,18 @@ const handlers = {
     return { repos: Object.entries(grouped).map(([repo, entries]) => ({ repo, entries })) };
   }
 };
+
+// ============ KANBAN → GITHUB ISSUES SYNC ============
+// Fired from /api/feedback-tasks/webhook below. Auto-classifies each kanban
+// task into CRMBackend or CRMFrontEnd via Haiku 4.5, then creates a GitHub
+// issue with tenant prefix in the title and routing reasoning in the body.
+const kanbanGithubSync = createKanbanGithubSync({
+  pool,
+  anthropic,
+  handlers,
+  callGitHub,
+  githubOrg: GITHUB_ORG,
+});
 
 // ============ CRM INSTANCE REST API ============
 
@@ -3535,6 +3609,26 @@ app.post('/api/feedback-tasks/sync', async (req, res) => {
   }
 });
 
+// One-shot backfill: push every pending non-done kanban task for a tenant into
+// GitHub Issues. Runs sequentially (avoid Anthropic + GitHub rate-limit bursts).
+// Query params:
+//   tenant         (required)  — qwilt, packetfabric, etc.
+//   retry_failed   (optional)  — '1'/'true' to also retry rows in 'failed' state
+//   dry_run        (optional)  — '1'/'true' to return the candidate list without firing
+//   limit          (optional)  — max rows to process (default 200)
+app.post('/api/feedback-tasks/push-to-github', async (req, res) => {
+  try {
+    const tenant = tenantFromQuery(req);
+    const retryFailed = ['1', 'true', 'yes'].includes(String(req.query.retry_failed || '').toLowerCase());
+    const dryRun = ['1', 'true', 'yes'].includes(String(req.query.dry_run || '').toLowerCase());
+    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
+    const summary = await kanbanGithubSync.backfillTenant({ tenant, retryFailed, dryRun, limit });
+    res.json(summary);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
 // Webhook intake from CRMBackend. Validates per-tenant secret, dispatches on
 // eventType, and replies 204 on success. Errors return 4xx/5xx so CRMBackend
 // can log them — but CRMBackend's TaskWebhookService treats this fire-and-
@@ -3559,6 +3653,19 @@ app.post('/api/feedback-tasks/webhook', async (req, res) => {
     const { eventType, data } = req.body || {};
     if (!eventType || !data) {
       return res.status(400).json({ error: 'Missing eventType or data' });
+    }
+
+    // Pre-read prior state so we can detect status transitions for the
+    // GitHub-Issues sync after the transaction commits. Cheap indexed lookup.
+    let prevState = null;
+    if ((eventType === 'task.created' || eventType === 'task.updated') && data.task?.id) {
+      const pre = await pool.query(
+        `SELECT status, github_issue_number
+           FROM mcp_feedback_tasks
+          WHERE tenant = $1 AND crm_task_id = $2`,
+        [tenant, data.task.id],
+      );
+      prevState = pre.rows[0] || null;
     }
 
     const client = await pool.connect();
@@ -3616,6 +3723,37 @@ app.post('/api/feedback-tasks/webhook', async (req, res) => {
       throw err;
     } finally {
       client.release();
+    }
+
+    // Fire-and-forget GitHub Issues sync after the mirror is committed. The
+    // tenant CRMBackend webhook caller already treats this fire-and-forget,
+    // so we never block the user-facing CRM write on classifier or GH latency.
+    if (eventType === 'task.created' || eventType === 'task.updated') {
+      const crmTaskId = data.task?.id;
+      const newStatus = data.task?.status;
+      if (crmTaskId) {
+        if (!prevState?.github_issue_number) {
+          // No issue yet — try to create one. The claim-pattern UPDATE inside
+          // pushKanbanTaskToGitHub is idempotent: skip-if-issued, skip-if-done.
+          setImmediate(() => {
+            kanbanGithubSync
+              .pushKanbanTaskToGitHub({ tenant, crmTaskId })
+              .catch((err) => console.error('[kanban-gh-sync] push error:', err));
+          });
+        } else if (
+          eventType === 'task.updated' &&
+          prevState?.status !== 'done' &&
+          newStatus === 'done'
+        ) {
+          // Existing issue, kanban moved to done — comment + status:done label.
+          // Issue stays open per product decision.
+          setImmediate(() => {
+            kanbanGithubSync
+              .commentDoneOnGitHub({ tenant, crmTaskId })
+              .catch((err) => console.error('[kanban-gh-sync] commentDone error:', err));
+          });
+        }
+      }
     }
 
     res.status(204).send();
@@ -3718,6 +3856,17 @@ app.get('/api/github/activity', async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/github/issues', async (req, res) => {
+  try {
+    const { repo, title, body, labels, assignees } = req.body || {};
+    const result = await handlers.create_github_issue({ repo, title, body, labels, assignees });
+    res.status(201).json(result);
+  } catch (err) {
+    const status = /required/i.test(err.message) ? 400 : 500;
+    res.status(status).json({ error: err.message });
   }
 });
 
