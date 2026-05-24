@@ -1,0 +1,1060 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CRM Self-Repair Pipeline — Build Plan for Adam (2026-05-24)</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    max-width: 1080px;
+    margin: 40px auto;
+    padding: 0 24px 80px;
+    color: #1f2933;
+    line-height: 1.55;
+  }
+  h1 {
+    font-size: 28px;
+    margin-bottom: 4px;
+    border-bottom: 2px solid #1e3a8a;
+    padding-bottom: 8px;
+    color: #0f172a;
+  }
+  .subtitle { color: #64748b; margin-top: 0; font-size: 14px; }
+  .meta { color: #475569; font-size: 13px; margin: 4px 0 0 0; }
+  .meta strong { color: #1e293b; }
+  h2 {
+    font-size: 21px;
+    margin-top: 46px;
+    color: #1e3a8a;
+    border-top: 1px solid #e2e8f0;
+    padding-top: 20px;
+  }
+  h3 { font-size: 17px; margin: 26px 0 8px; color: #0f172a; }
+  h4 {
+    font-size: 14.5px;
+    margin: 18px 0 6px;
+    color: #334155;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin-top: 12px;
+    font-size: 13.5px;
+  }
+  th, td {
+    border: 1px solid #e2e8f0;
+    padding: 8px 11px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: #f8fafc;
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #475569;
+  }
+  tr:nth-child(even) td { background: #fcfcfd; }
+  code {
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 12.5px;
+    color: #0f172a;
+  }
+  pre {
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 14px 16px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    overflow-x: auto;
+    line-height: 1.55;
+  }
+  pre code { background: transparent; border: none; color: inherit; padding: 0; font-size: 12.5px; }
+  pre.ascii { background: #0b1220; color: #cbd5e1; font-size: 11.5px; line-height: 1.4; }
+  .callout {
+    border-left: 3px solid #1e3a8a;
+    background: #eff6ff;
+    padding: 10px 14px;
+    margin: 14px 0;
+    font-size: 13.5px;
+    color: #1e293b;
+    border-radius: 0 4px 4px 0;
+  }
+  .callout.warn { border-left-color: #f59e0b; background: #fffbeb; }
+  .callout.danger { border-left-color: #b91c1c; background: #fef2f2; }
+  .callout.success { border-left-color: #15803d; background: #f0fdf4; }
+  .callout.decision { border-left-color: #7c2d12; background: #fff7ed; }
+  .tag {
+    display: inline-block;
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    color: #fff;
+    letter-spacing: 0.03em;
+    margin-right: 4px;
+  }
+  .tag-new    { background: #15803d; }
+  .tag-ext    { background: #1e3a8a; }
+  .tag-exists { background: #475569; }
+  .tag-w1 { background: #1e3a8a; }
+  .tag-w2 { background: #6b21a8; }
+  .tag-w3 { background: #b45309; }
+  .tag-w4 { background: #15803d; }
+  .tag-w5 { background: #b91c1c; }
+  .tag-w6 { background: #475569; }
+  .toc {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 14px 18px 14px 32px;
+    font-size: 13.5px;
+    margin: 18px 0 8px;
+  }
+  .toc ol { margin: 0; }
+  .toc a { color: #1e3a8a; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  ul, ol { margin: 6px 0 6px 22px; padding: 0; }
+  li { margin-bottom: 5px; }
+  .field-grid {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 6px 14px;
+    font-size: 13.5px;
+    margin-top: 8px;
+  }
+  .field-grid .k { color: #475569; font-weight: 600; font-size: 12.5px; }
+  hr { border: none; border-top: 1px dashed #cbd5e1; margin: 24px 0; }
+  .small { font-size: 12.5px; color: #64748b; }
+</style>
+</head>
+<body>
+
+<h1>CRM Self-Repair Pipeline — Build Plan for Adam</h1>
+<p class="subtitle">Companion to v0.2 spec — concrete build sequence, code shapes, and the MD files Claude needs.</p>
+<p class="meta"><strong>Date:</strong> 2026-05-24 &middot; <strong>Revision:</strong> v0.3.2 (triage outputs technical bug + fix sketch) &middot; <strong>Author:</strong> Chris &middot; <strong>For:</strong> Adam &middot; <strong>Companion to:</strong> v0.2 spec by Adam (2026-05-24)</p>
+
+<div class="callout">
+<strong>What this is.</strong> Your v0.2 spec is the architecture. This doc is the build plan layered on top — what's been decided since v0.2, the code/prompt shapes for each component, the MD instruction files Claude reads at each stage, and a build sequence with concrete deliverables. Read this with the v0.2 spec open.
+</div>
+
+<div class="callout decision">
+<strong>v0.3.1 revision (Actions-first).</strong> v0.3 had the implementer + reviewer running in a custom GCE VM with a baked DevTemplate image (Wedges 2-3 of the original plan). v0.3.1 swaps that for <strong>GitHub Actions</strong> for v1 — same isolation, zero infra to build, ~4 weeks to a working loop instead of 7-9. The GCE path is still the right long-term destination; we just don't start there. Sections affected: §1, §2, §5, §11, §12.
+</div>
+
+<div class="callout decision">
+<strong>v0.3.2 revision (technical bug synthesis + proposed fix sketch).</strong> Adam's idea: catch the "test passes but the fix is wrong-shaped" failure mode where Claude burns 200k tokens hacking around the test instead of fixing the underlying bug. Triage now produces two new outputs alongside acceptance criteria: <code>synthesized_bug_md</code> (a technical restatement of the bug — file/function/expected behavior, not the customer's words) and <code>proposed_fix_md</code> (guidance for the implementer on the shape of the fix). The reviewer's Check 3 gains a "diff resembles proposed shape?" substep — passes-test-but-wrong-shape gets surfaced to humans. Sections affected: §3.4, §7.1. Migration (still unapplied) was extended with two new columns.
+</div>
+
+<h2>Table of Contents</h2>
+<div class="toc">
+<ol>
+  <li><a href="#decided">What's decided since v0.2</a></li>
+  <li><a href="#flow">End-to-end flow</a></li>
+  <li><a href="#triage">The triage worker (Wedge 1)</a></li>
+  <li><a href="#issue">What gets opened in GitHub</a></li>
+  <li><a href="#runner">GitHub Actions runner</a></li>
+  <li><a href="#implementer">Implementer agent</a></li>
+  <li><a href="#reviewer">Reviewer agent (replaces Chris's manual PR review)</a></li>
+  <li><a href="#pr">PR opening + branch strategy</a></li>
+  <li><a href="#md">MD instruction files Claude needs</a></li>
+  <li><a href="#sam">Coordination with Sam</a></li>
+  <li><a href="#wedges">Build sequence — four wedges</a></li>
+  <li><a href="#open">Open decisions for Chris</a></li>
+</ol>
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="decided">1. What's decided since v0.2</h2>
+
+<p>Five things changed or pinned down since v0.2 was drafted. Build to these.</p>
+
+<table>
+  <thead><tr><th>Decision</th><th>v0.2 said</th><th>v0.3 (this doc) says</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Intake unification</td>
+      <td>"Wedge 0 — unify dashboard bug-submit into mcp_feedback_tasks"</td>
+      <td><strong>Tenant-only intake for v1.</strong> Admin dashboard <code>pm.bugReport</code> stays in its own table. Not triaged.</td>
+      <td>Saves 2 days. Path A (tenant CRM) is the real volume. Testing the loop = file bugs through the dev tenant's CRM, not the admin dashboard.</td>
+    </tr>
+    <tr>
+      <td>Code context strategy</td>
+      <td>Not specified explicitly (planner uses <code>gh api</code>)</td>
+      <td><strong>Agentic search, no code-in-a-DB.</strong> Two <code>gh_*</code> tools the agent calls live.</td>
+      <td>Code changes constantly. Live search beats stale embeddings. RAG service keeps doing KB/tickets only.</td>
+    </tr>
+    <tr>
+      <td>Triage runtime</td>
+      <td>Cloud Run job or sibling service</td>
+      <td><strong>Same Cloud Run service (AgentBoxDev), new background worker.</strong> <code>setImmediate</code> after webhook upsert, plus safety poller.</td>
+      <td>DB/auth/secrets already wired. One deploy pipeline. Split out later if it thrashes.</td>
+    </tr>
+    <tr>
+      <td>Implementation &amp; reviewer runtime</td>
+      <td>Custom GCE VM image with DevTemplate pre-baked + headless setup work (v0.2 Phase 0-3)</td>
+      <td><strong>GitHub Actions for v1.</strong> Ephemeral hosted runners, triggered by <code>agent-eligible</code> label (implementer) and agent-branch push (reviewer). Drops the DevTemplate headless work + custom image entirely.</td>
+      <td>Already exists, zero infra. Native PR/issue integration. ~4 weeks to working loop instead of 7-9. GitHub events replace the orchestrator daemon for v1. Build the GCE path later if Actions becomes a bottleneck.</td>
+    </tr>
+    <tr>
+      <td>Merge target</td>
+      <td>"main" implicit</td>
+      <td><strong>Agent PRs target <code>dev</code>, never <code>main</code>.</strong> Humans promote <code>dev</code> → <code>main</code> on existing cadence.</td>
+      <td>Safety buffer. If the agent ships something bad, it lands on dev environment first. Branch protection on <code>main</code> enforces this at GitHub layer, not just convention.</td>
+    </tr>
+    <tr>
+      <td>Review structure</td>
+      <td>One verifier (acceptance test + regression + additive-only)</td>
+      <td><strong>Three explicit checks, one reviewer agent run:</strong> security, feature-flag gating, regression/breakage. Structured Markdown report = PR body.</td>
+      <td>Matches Chris's manual PR checklist exactly. Reuses <code>/security-review</code> skill. Explicit reporting beats opaque verdicts.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout decision">
+<strong>The point of the reviewer agent.</strong> When Chris reviews a PR today, he asks three questions:
+<ol>
+  <li>Is there anything structurally or security-wise broken?</li>
+  <li>Is it properly feature-flagged?</li>
+  <li>Is it going to break anything else?</li>
+</ol>
+The reviewer agent answers exactly those three, with evidence, before the PR is opened. If it can't answer all three with "PASS," the PR doesn't open. That's the bar.
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="flow">2. End-to-end flow</h2>
+
+<pre class="ascii">
+┌────────────────────────────────────────────────────────────────────────────┐
+│  TENANT CRM (dev / packetfabric / qwilt / dtiq / welink / element8)        │
+│                                                                            │
+│    Customer opens feedback channel in CRMFrontEnd                          │
+│       → TaskCreateForm.tsx                                                 │
+│       → CRMBackend tasks.service.ts                                        │
+│       → kanbanWebhookService.emitTaskCreated()                             │
+│       → POST /api/feedback-tasks/webhook (per-tenant HMAC)                 │
+└─────────────────────────────────┬──────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│  AGENTBOXDEV (Cloud Run, agentbox-485618)                                  │
+│                                                                            │
+│    server.js:/api/feedback-tasks/webhook                                   │
+│       → upsertFeedbackTask() into mcp_feedback_tasks  (THE QUEUE)          │
+│       → setImmediate(triageFeedbackTask(rowId))                            │
+│                                                                            │
+│    triage.mjs:triageFeedbackTask()    ← NEW (Wedge 1)                      │
+│       → Claude Sonnet 4.6                                                  │
+│       → tools: gh_search_code, gh_get_file                                 │
+│       → output: { scope, acceptance_md, reproducer_md, test_stub_md }      │
+│       → writes mcp_feedback_tasks: state='planned', scope, *_md            │
+│       → opens 1 or 2 GH issues (sharing crm_task_id)                       │
+│       → inserts rows into mcp_feedback_task_issues                         │
+│                                                                            │
+│    orchestrator.mjs:tick()           ← Wedge 6 (later)                     │
+│       → polls mcp_feedback_tasks WHERE state='planned'                     │
+│       → requests a VM via runner-control                                   │
+└─────────────────────────────────┬──────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│  GITHUB ACTIONS  (ephemeral hosted runner, triggered by GH events)         │
+│                                                                            │
+│  .github/workflows/agent-implement.yml                                     │
+│    on: issues.labeled[agent-eligible]                                      │
+│    runs-on: ubuntu-latest                                                  │
+│                                                                            │
+│    1. checkout origin/dev                                                  │
+│    2. install node, postgres, playwright (cached)                          │
+│    3. ./bin/setup --headless  (dev seed only for v1)                       │
+│    4. create branch agent/<crm_task_id>-attempt-N                          │
+│    5. commit pre-written test from issue body                              │
+│    6. claude-code --agent implementer                                      │
+│         → edits code, runs tests, iterates until acceptance test passes    │
+│    7. push agent branch (just the branch — NOT to dev)                     │
+│    8. upload-artifact: transcript, screenshots, logs                       │
+│                                                                            │
+│  .github/workflows/agent-review.yml                                        │
+│    on: push to agent/** branches                                           │
+│    runs-on: ubuntu-latest                                                  │
+│                                                                            │
+│    1. checkout agent branch                                                │
+│    2. install + ./bin/setup --headless                                     │
+│    3. claude-code --agent reviewer  ← THREE CHECKS                         │
+│         → 1. /security-review                                              │
+│         → 2. feature-flag gating check                                     │
+│         → 3. regression + adjacent flows + additive-only check             │
+│    4. If all PASS:                                                         │
+│         gh pr create --base dev  (PR body = reviewer's report)             │
+│    5. If any FAIL:                                                         │
+│         gh issue comment with failure summary; add                         │
+│         state:blocked-needs-human label                                    │
+│    6. Upload artifacts (videos, screenshots, reviewer evidence)            │
+│                                                                            │
+│  No orchestrator daemon needed — GitHub events do the dispatch.            │
+└─────────────────────────────────┬──────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│  HUMAN REVIEW (in Sam's PM UI + GitHub)                                    │
+│                                                                            │
+│    Chris reviews PR(s) against dev branch                                  │
+│       → Reads structured reviewer report                                   │
+│       → Watches Playwright video                                           │
+│       → Reads diff, runs locally if needed                                 │
+│       → Approves + merges to dev                                           │
+│                                                                            │
+│    CI deploys to dev environment                                           │
+│                                                                            │
+│    On existing dev→main promotion cadence: Chris promotes                  │
+│    (Agent never touches main directly.)                                    │
+└────────────────────────────────────────────────────────────────────────────┘
+</pre>
+
+<!-- ===================================================================== -->
+<h2 id="triage">3. The triage worker <span class="tag tag-w1">WEDGE 1</span></h2>
+
+<h3>3.1 Where it lives</h3>
+<p>New file: <code>AgentBoxDev/triage.mjs</code>. Same Cloud Run service. Imported from <code>server.js</code> and fired after every successful <code>upsertFeedbackTask</code>.</p>
+
+<h3>3.2 Trigger</h3>
+<p>Two paths, redundant on purpose:</p>
+<ol>
+  <li><strong>Webhook-fired</strong>: in <code>server.js</code> at the existing <code>/api/feedback-tasks/webhook</code> handler, after <code>upsertFeedbackTask</code>, fire <code>setImmediate(() => triageFeedbackTask(taskId))</code>. Mirrors how <code>pushKanbanTaskToGitHub</code> is already wired.</li>
+  <li><strong>Safety poller</strong>: every 60s, claim and triage anything with <code>planner_status='pending' AND created_at &lt; NOW() - INTERVAL '1 minute'</code>. Catches webhook-fired runs that crashed.</li>
+</ol>
+
+<h3>3.3 Code shape</h3>
+<pre><code>// AgentBoxDev/triage.mjs
+import Anthropic from '@anthropic-ai/sdk';
+import { db } from './db.mjs';
+import { ghSearchCode, ghGetFile } from './tools/github.mjs';
+import { TRIAGE_SYSTEM_PROMPT } from './prompts/triage.mjs';
+
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+const GH_SEARCH_CODE_TOOL = {
+  name: 'gh_search_code',
+  description: 'Search code in a DAAITeam repo. Returns matching paths and line snippets.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      repo: { type: 'string', enum: ['CRMBackend', 'CRMFrontEnd'] },
+      query: { type: 'string', description: 'Code search query, e.g. "function handleFeedback" or "@Controller portal"' },
+    },
+    required: ['repo', 'query'],
+  },
+};
+
+const GH_GET_FILE_TOOL = {
+  name: 'gh_get_file',
+  description: 'Fetch the full content of a file from a DAAITeam repo at HEAD of dev branch.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      repo: { type: 'string', enum: ['CRMBackend', 'CRMFrontEnd'] },
+      path: { type: 'string' },
+    },
+    required: ['repo', 'path'],
+  },
+};
+
+export async function triageFeedbackTask(taskId) {
+  // Atomic claim — only one worker triages a row.
+  const claimed = await db.query(
+    `UPDATE mcp_feedback_tasks
+        SET planner_status = 'running', planner_started_at = NOW()
+      WHERE id = $1 AND planner_status = 'pending'
+      RETURNING *`,
+    [taskId],
+  );
+  if (claimed.rowCount === 0) return;
+  const task = claimed.rows[0];
+
+  try {
+    const userPrompt = renderTaskPrompt(task);
+
+    // Agentic loop: Claude calls tools, we execute, return result, repeat until stop.
+    let messages = [{ role: 'user', content: userPrompt }];
+    let response;
+    for (let turn = 0; turn &lt; 20; turn++) {
+      response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 8000,
+        system: TRIAGE_SYSTEM_PROMPT,
+        tools: [GH_SEARCH_CODE_TOOL, GH_GET_FILE_TOOL],
+        messages,
+      });
+      messages.push({ role: 'assistant', content: response.content });
+
+      if (response.stop_reason !== 'tool_use') break;
+
+      const toolResults = await Promise.all(
+        response.content
+          .filter(b =&gt; b.type === 'tool_use')
+          .map(async b =&gt; ({
+            type: 'tool_result',
+            tool_use_id: b.id,
+            content: await runTool(b.name, b.input),
+          })),
+      );
+      messages.push({ role: 'user', content: toolResults });
+    }
+
+    const plan = extractJsonOutput(response);
+    await persistPlan(task, plan);
+    if (plan.scope !== 'skip') {
+      await openProjectedIssues(task, plan);
+    }
+  } catch (err) {
+    await db.query(
+      `UPDATE mcp_feedback_tasks
+          SET planner_status='failed', planner_error=$2
+        WHERE id=$1`,
+      [taskId, String(err)],
+    );
+    throw err;
+  }
+}
+
+async function runTool(name, input) {
+  if (name === 'gh_search_code') return await ghSearchCode(input.repo, input.query);
+  if (name === 'gh_get_file')    return await ghGetFile(input.repo, input.path);
+  throw new Error(`Unknown tool: ${name}`);
+}
+</code></pre>
+
+<h3>3.4 Output schema (what Sonnet returns)</h3>
+<pre><code>{
+  "scope": "fe" | "be" | "both" | "skip",
+  "skip_reason": "needs-migration | needs-design-discussion | duplicate | not-actionable | needs-coordinated-deploy",
+  "areas": ["portal", "tickets", "sla"],
+  "files_touched": [
+    { "repo": "CRMFrontEnd", "path": "src/components/portal/Foo.tsx", "reason": "..." }
+  ],
+  "synthesized_bug_md": "GET /portal/billing returns Account A even when ?account=B. billing.service.ts:42 ignores the param and queries by currentUser.primaryAccountId. Expected: filter by account when set, gated by AccountAccessGuard.",
+  "acceptance_md": "GIVEN portal_user_1 on PacketFabric ...\nWHEN they click X\nTHEN ...\nAND NOT ...",
+  "reproducer_md": "1. ./bin/setup-ci.sh\n2. ...",
+  "proposed_fix_md": "- billing.controller.ts:54 — add optional `account?: string` query param (additive)\n- billing.service.ts:42 — when set, validate via AccountAccessGuard then filter; when null, preserve behavior\n- portal-billing.ts:18 — pass param through API client\n- Switcher.tsx — push history.replaceState, trigger refetch",
+  "test_stub_md": "```ts\n// tests/e2e/feedback-&lt;crm_task_id&gt;.spec.ts\nimport { test, expect } from '@playwright/test';\n...\n```",
+  "labels": ["agent-eligible", "tenant:packetfabric", "area:portal", "type:bug", "priority:high"],
+  "confidence": 0.85,
+  "reasoning": "Brief explanation of the call. Visible in the issue body."
+}
+</code></pre>
+
+<p class="small"><strong>The two new fields (v0.3.2):</strong></p>
+<ul>
+  <li><code>synthesized_bug_md</code> — agent's clean technical restatement of the bug. Names file/function/expected behavior, not the customer's words. Becomes the issue's lede; the implementer reads this, not the original report.</li>
+  <li><code>proposed_fix_md</code> — agent's suggested shape for the fix, bulleted by file. <strong>Guidance, not mandate</strong> — implementer may deviate with documented reason. The reviewer's Check 3 compares actual diff against this shape as a second axis beyond "did the test pass?"</li>
+</ul>
+
+<h3>3.5 DB writes</h3>
+<pre><code>UPDATE mcp_feedback_tasks
+   SET state = 'planned',
+       agent_eligible = (plan.scope != 'skip'),
+       planner_status = 'opened',
+       planner_decision = plan.scope,
+       scope = plan.scope,
+       acceptance_md = plan.acceptance_md,
+       reproducer_md = plan.reproducer_md,
+       test_stub_md = plan.test_stub_md,
+       planner_summary = plan.reasoning,
+       planner_confidence = plan.confidence
+ WHERE id = $1;
+
+-- Then one INSERT per opened issue:
+INSERT INTO mcp_feedback_task_issues
+  (feedback_task_id, repo, issue_number, issue_url, sync_status)
+VALUES ($1, $2, $3, $4, 'synced');
+</code></pre>
+
+<!-- ===================================================================== -->
+<h2 id="issue">4. What gets opened in GitHub</h2>
+
+<p><strong>Issues, not PRs.</strong> Triage produces a specification, not code. The PR comes after the implementer runs (Wedge 4).</p>
+
+<p>Each projected issue is the agent's "spec" — it carries everything downstream stages need:</p>
+
+<ul>
+  <li><strong>Title:</strong> <code>[&lt;TENANT&gt;][&lt;crm_task_id&gt;] &lt;original title&gt;</code> — grep-friendly</li>
+  <li><strong>Hidden trailer:</strong> <code>&lt;!-- agentbox-sync: tenant=&lt;slug&gt; crm_task_id=&lt;id&gt; --&gt;</code> — machine-readable link back to DB row (this pattern already exists in <code>kanban-github-sync.mjs</code>)</li>
+  <li><strong>Body:</strong> acceptance criteria, reproducer, pre-written test stub, paired-with link (if scope=both), planner reasoning, link to source kanban task</li>
+  <li><strong>Labels:</strong> <code>agent-eligible</code>, <code>tenant:&lt;slug&gt;</code>, <code>area:&lt;X&gt;</code>, <code>type:&lt;bug|feature&gt;</code>, <code>priority:&lt;P&gt;</code>, <code>paired</code> (if scope=both), <code>state:planned</code></li>
+</ul>
+
+<p>If <code>scope=skip</code>, open ONE fallback issue with <code>agent-skip</code> + reason label, in the planner's best-guess repo. Surfaces to humans for manual triage.</p>
+
+<!-- ===================================================================== -->
+<h2 id="runner">5. GitHub Actions runner <span class="tag tag-w2">WEDGE 2</span></h2>
+
+<p>Each agent attempt runs in an ephemeral GitHub-hosted runner. Triggered by GitHub events — no orchestrator daemon, no custom VM image, no DevTemplate headless prep work for v1. Brandt's "spin up a VM with Playwright" idea is preserved; we just use GitHub's VMs instead of building our own.</p>
+
+<h3>5.1 The two workflows</h3>
+<p>Two workflow files. They fire on different events so the reviewer can run cleanly against just the pushed diff, and a failed reviewer doesn't have to rerun the implementer.</p>
+
+<table>
+  <thead><tr><th>File</th><th>Trigger</th><th>Job</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>.github/workflows/agent-implement.yml</code></td>
+      <td><code>issues.labeled</code> with <code>agent-eligible</code></td>
+      <td>Set up env → invoke implementer agent → push agent branch (does NOT open PR yet)</td>
+    </tr>
+    <tr>
+      <td><code>.github/workflows/agent-review.yml</code></td>
+      <td><code>push</code> to <code>agent/**</code> branches</td>
+      <td>Set up env → invoke reviewer (3 checks) → on PASS open PR against <code>dev</code>; on FAIL comment + label issue</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Each in-scope repo (CRMBackend, CRMFrontEnd) gets its own copy of both workflows. For paired work items the planner labels both issues; both workflows fire independently.</p>
+
+<h3>5.2 Per-attempt steps (agent-implement.yml)</h3>
+<ol>
+  <li><code>actions/checkout</code> with <code>ref: dev</code></li>
+  <li>Setup Node 20, Postgres 18, Playwright + browsers (cached — ~30s steady-state, ~3min cold)</li>
+  <li>Run repo-local <code>./bin/setup-ci.sh</code> (headless DB + seed; thin wrapper, no DevTemplate dependency)</li>
+  <li>Read the work item from the labeled issue body; extract acceptance criteria + test stub</li>
+  <li>Create <code>agent/&lt;crm_task_id&gt;-attempt-&lt;n&gt;</code> from <code>origin/dev</code></li>
+  <li>Commit the pre-written test (with a guard hook that pins this file's hash)</li>
+  <li>Invoke <code>claude-code</code> with the implementer prompt; let it iterate until acceptance test passes or max-turns hit</li>
+  <li><code>git push origin agent/&lt;crm_task_id&gt;-attempt-&lt;n&gt;</code> (just the agent branch — NOT a push to <code>dev</code>)</li>
+  <li><code>actions/upload-artifact</code>: transcript, screenshots, logs</li>
+</ol>
+
+<h3>5.3 Per-attempt steps (agent-review.yml)</h3>
+<ol>
+  <li><code>actions/checkout</code> on the just-pushed agent branch</li>
+  <li>Setup env + <code>./bin/setup-ci.sh</code></li>
+  <li>Invoke reviewer agent (three checks — see §7)</li>
+  <li>If all checks PASS: <code>gh pr create --base dev</code>; PR body = reviewer's structured report</li>
+  <li>If any FAIL: <code>gh issue comment</code> with summary; add <code>state:blocked-needs-human</code> label to the source issue</li>
+  <li>Upload Playwright videos + reviewer evidence as Action artifacts; link from PR body / issue comment</li>
+</ol>
+
+<h3>5.4 Why GitHub Actions over a custom VM (v1)</h3>
+<ul>
+  <li><strong>Zero infra to build.</strong> No Packer recipe, no image build pipeline, no Cloud Run dispatcher, no DevTemplate <code>--agent</code> mode.</li>
+  <li><strong>Native event triggers.</strong> Label transitions on issues fire workflows automatically — no orchestrator daemon needed for v1.</li>
+  <li><strong>Same isolation.</strong> Each Action run is a fresh ephemeral VM. One agent run can't see another's state.</li>
+  <li><strong>Native PR + issue integration.</strong> <code>gh</code> is preinstalled and authenticated; comments, labels, PR creation all "just work."</li>
+  <li><strong>Cost.</strong> At 20 runs/day × ~30 min = 600 min/day = ~$144/mo on private repos (free tier adds ~2000 min/mo on team plans). Cheaper and more elastic than a Cloud Run service that's mostly idle.</li>
+  <li><strong>Self-hosted escape hatch.</strong> If the 60-min cap or cost becomes painful, point Actions at a single beefy self-hosted GCE runner — no rewrite, just a <code>runs-on</code> label change.</li>
+</ul>
+
+<h3>5.5 What we give up vs the v0.3 GCE plan</h3>
+<ul>
+  <li><strong>60-min hard cap per run.</strong> Same as the VM TTL I'd set anyway. Wash.</li>
+  <li><strong>No pre-baked image.</strong> Each run installs deps from cache (~30s warm, ~3min cold). Tolerable.</li>
+  <li><strong>Per-tenant config requires runtime input.</strong> Workflow runs with whatever env you pass. For v1 (dev seed only) this is fine; for per-tenant runs later, pass <code>--tenant</code> as a workflow input.</li>
+  <li><strong>DevTemplate headless work shelved.</strong> Still useful for local dev and human onboarding, just not blocking the agent loop. Decouple and ship at its own pace.</li>
+</ul>
+
+<h3>5.6 Why Playwright matters</h3>
+<p>The reviewer runs the acceptance test <em>and</em> a "headed" render of the same test that captures a video via Playwright's <code>video: 'on'</code>. The video uploads as an Action artifact and is linked from the PR body. Chris (or any reviewer) can watch the 30-second clip before approving. That's what makes the reviewer credible — not a JSON verdict, but observable behavior.</p>
+
+<!-- ===================================================================== -->
+<h2 id="implementer">6. Implementer agent <span class="tag tag-w4">WEDGE 4</span></h2>
+
+<h3>6.1 Job</h3>
+<p>Read the work item (acceptance criteria + test stub from issue). Iterate on code in one or both in-scope repos under additive-only API discipline. Stop when the pre-written test passes and the existing suite is green.</p>
+
+<h3>6.2 Hard rules (enforced as commit-time guards, not just prompted)</h3>
+<table>
+  <thead><tr><th>Rule</th><th>Enforcement</th></tr></thead>
+  <tbody>
+    <tr><td>Cannot modify the pre-written test file</td><td>Git pre-commit hook checks <code>tests/e2e/feedback-&lt;crm_task_id&gt;.spec.ts</code> is unchanged from initial commit. Hard fail.</td></tr>
+    <tr><td>Cannot push to <code>main</code>, <code>dev</code>, or any protected branch</td><td>Push only allowed to <code>agent/*</code> branches. Branch protection enforced at GitHub.</td></tr>
+    <tr><td>Cannot force-push</td><td>Force-push disabled at GitHub branch protection level.</td></tr>
+    <tr><td>Cannot make breaking API changes</td><td>Static check: routes, DTOs, status codes diffed against <code>origin/dev</code>. See §8 of v0.2 spec.</td></tr>
+    <tr><td>Cannot run destructive DB ops</td><td>Tool layer refuses <code>DROP</code>, <code>TRUNCATE</code> on non-test tables.</td></tr>
+    <tr><td>Cannot access tenant prod DBs</td><td>No Cloud SQL proxy installed on runner image. Network allow-list excludes prod CIDRs.</td></tr>
+  </tbody>
+</table>
+
+<h3>6.3 Stopping conditions</h3>
+<ul>
+  <li>Acceptance test passes + existing suite green → success → hand to reviewer</li>
+  <li>Hit <code>max_turns</code> (default 40) → fail; orchestrator retries</li>
+  <li>Emits <code>BLOCKED: needs-migration</code> / <code>needs-coordinated-deploy</code> / <code>needs-tenant-data</code> → orchestrator escalates to human</li>
+</ul>
+
+<h3>6.4 Tool access</h3>
+<ul>
+  <li>Filesystem (read/edit/write/grep) on workspace</li>
+  <li>Shell: <code>npm</code>, <code>npx</code>, <code>git diff/status</code>, <code>curl localhost</code> only</li>
+  <li>Playwright via codegen and direct API</li>
+  <li><code>gh issue view</code> for re-reading context</li>
+  <li><strong>NO</strong> general network egress; <strong>NO</strong> direct API calls outside the allow-list</li>
+</ul>
+
+<!-- ===================================================================== -->
+<h2 id="reviewer">7. Reviewer agent — replaces Chris's manual PR review <span class="tag tag-w5">WEDGE 5</span></h2>
+
+<div class="callout success">
+<strong>This stage is the whole point.</strong> When this works reliably, Chris's PR review burden drops to "watch the video + skim the diff" instead of "read every line and check three different things." It's the wedge that justifies the rest of the build.
+</div>
+
+<h3>7.1 The three checks (one agent, one report)</h3>
+
+<h4>Check 1 — Security &amp; structural review</h4>
+<div class="field-grid">
+  <div class="k">Mechanism</div><div>Invoke Claude Code with the <code>/security-review</code> skill against the agent branch. That skill is Anthropic's, battle-tested, scoped exactly to "what's wrong here."</div>
+  <div class="k">Scans for</div><div>Secrets in code; SQL injection; missing auth guards on new endpoints; XSS; broken access control (e.g. tenant data leak); unsafe deserialization; SSRF; XXE; prototype pollution</div>
+  <div class="k">Plus structural</div><div>God-objects; missing error handling on critical paths (DB writes, external API calls); unawaited promises; new endpoints without input validation</div>
+  <div class="k">Output</div><div><code>{ status: 'pass' | 'fail', findings: [{ severity, file, line, description }] }</code></div>
+  <div class="k">Fail criterion</div><div>Any finding of severity <code>critical</code> or <code>high</code></div>
+</div>
+
+<h4>Check 2 — Feature-flag gating</h4>
+<div class="field-grid">
+  <div class="k">Mechanism</div><div>Static analysis first, Sonnet only for ambiguous cases</div>
+  <div class="k">Step 1 — Static</div><div>Walk the diff. For every new file or function in tenant-specific areas (matched against per-repo <code>.claude/REVIEW_RULES.md</code>), check whether it's reachable only behind an <code>ENABLE_*</code> environment-variable check or a <code>TenantFeatures</code> table lookup.</div>
+  <div class="k">Step 2 — Sonnet</div><div>For new code in mixed/ambiguous areas, ask: "Is this change company-specific or generic? If company-specific, where is the flag?" Constrained Sonnet call, ~2k tokens.</div>
+  <div class="k">Per-repo rules</div><div>Lives at <code>CRMBackend/.claude/REVIEW_RULES.md</code> and <code>CRMFrontEnd/.claude/REVIEW_RULES.md</code>. Lists which areas are company-specific (portal, billing UI, ticket views) and which are generic (auth, RBAC, core CRUD).</div>
+  <div class="k">Output</div><div><code>{ status, new_code_paths: [{ file, line, gated_by, verdict }] }</code></div>
+  <div class="k">Fail criterion</div><div>Any tenant-specific code path without a flag — see project memory: <em>"Company-specific features must be feature-flagged"</em></div>
+</div>
+
+<h4>Check 3 — Regression / blast-radius / additive-only</h4>
+<div class="field-grid">
+  <div class="k">Mechanism</div><div>Mostly mechanical, some Sonnet judgment for adjacency picks</div>
+  <div class="k">Step 1</div><div>Run new acceptance test (headless + headed with video). Required pass.</div>
+  <div class="k">Step 2</div><div>Run full existing suite in each touched repo. Required pass.</div>
+  <div class="k">Step 3</div><div>Sonnet picks N (default 5) "adjacent" test files based on import graph + path proximity to changed files. Run them. Required pass.</div>
+  <div class="k">Step 4</div><div>Sonnet picks 3-5 adjacent Playwright user flows. Smoke them. Soft signal (warn, don't fail).</div>
+  <div class="k">Step 5 — Additive-only check</div><div>Static diff of route registry, DTO schemas, status codes, Prisma schema vs <code>origin/dev</code>. Any rename / removal / semantic change fails. (See v0.2 spec §8.)</div>
+  <div class="k">Step 6 — Diff resembles proposed shape (v0.3.2)</div><div>Compare the actual diff against the triage agent's <code>proposed_fix_md</code>. Did the implementer touch the files the planner expected? Did it apply the kind of change described? <strong>Big deviation without documented reason in the workpad = surface to human</strong> (warn, don't fail outright — the implementer might have found a genuinely better path). Catches "test passes but fix is structurally unrelated to the actual bug" — i.e. test-hacking, mock injection, hardcoded values.</div>
+  <div class="k">Output</div><div><code>{ status, acceptance_test, existing_suite, adjacent_tests, additive_check, fix_shape_match }</code></div>
+  <div class="k">Fail criterion</div><div>Required steps fail; additive-only violation fails; fix_shape_match=diverged without workpad rationale → warn (Chris reviews)</div>
+</div>
+
+<h3>7.2 What the reviewer outputs (becomes PR body verbatim)</h3>
+<pre><code># Agent-opened PR — automated review summary
+
+## Reported behavior
+&lt;Original tenant report, lightly cleaned. No filenames or identifiers.&gt;
+
+## What changed (logical)
+&lt;1-3 sentences. User-visible change in plain language.&gt;
+
+## Paired with
+&lt;If scope=both: cross-link to the counterpart PR in the other repo.&gt;
+
+---
+
+## 1. Security &amp; structural review
+**Status:** PASS
+
+- Critical: 0
+- High: 0
+- Medium: 1 (advisory) — `src/controllers/portal.controller.ts:54` — new endpoint
+  could log request body without redaction; consider sanitizing
+- Findings full: gs://agentbox-agent-runs/&lt;run_id&gt;/security-review.json
+
+## 2. Feature-flag gating
+**Status:** PASS
+
+| New code path | Gated by |
+|---|---|
+| `src/components/portal/MyAccount/Switcher.tsx` | `NEXT_PUBLIC_PF_MYACCOUNT_V2` |
+| `src/controllers/portal/my-account.controller.ts` | `tenantFeatures.pfMyAccountV2` |
+
+## 3. Regression / blast-radius
+**Status:** PASS
+
+- Acceptance test: PASS — video: gs://.../acceptance-headed.webm
+- Existing suite (CRMBackend): 412 passed, 0 failed, 3 skipped
+- Existing suite (CRMFrontEnd): 218 passed, 0 failed, 1 skipped
+- Adjacent tests: 5 picked, 5 passed
+- Adjacent flows (smoke): 4 picked, 4 passed
+- Additive-only contract: PASS
+
+---
+
+## Origin
+- Work item: `packetfabric/CRM-1234`
+- Tenant kanban: &lt;link&gt;
+- Issue: #&lt;issue#&gt;
+- Run artifacts: gs://agentbox-agent-runs/&lt;run_id&gt;/
+- Transcript: gs://.../implementer-transcript.txt
+
+This PR was opened by an automated agent. A human must approve and merge.
+Branch target: `dev` (per agent policy — never targets `main`).
+</code></pre>
+
+<h3>7.3 Failure routing</h3>
+<table>
+  <thead><tr><th>Check failed</th><th>Action</th></tr></thead>
+  <tbody>
+    <tr><td>Security — critical/high finding</td><td>Retry implementer with finding as hint. After 2 retries → BLOCKED.</td></tr>
+    <tr><td>Feature-flag — missing flag</td><td>Retry implementer with "add flag X" hint. After 1 retry → BLOCKED.</td></tr>
+    <tr><td>Acceptance test fails</td><td>Retry implementer with first-failure trace.</td></tr>
+    <tr><td>Existing suite fails</td><td>Retry; same test fails 2× → escalate to Opus 4.7.</td></tr>
+    <tr><td>Adjacent test fails</td><td>Hard fail; this is collateral damage, agent broke something. BLOCKED.</td></tr>
+    <tr><td>Adjacent flow fails (smoke)</td><td>Soft warn; PR opens with warning section.</td></tr>
+    <tr><td>Additive-only violation</td><td>Hard fail; retry with hint; persistent → BLOCKED with <code>needs-coordinated-deploy</code>.</td></tr>
+  </tbody>
+</table>
+
+<!-- ===================================================================== -->
+<h2 id="pr">8. PR opening + branch strategy</h2>
+
+<h3>8.1 Branch and target — pinned</h3>
+<div class="field-grid">
+  <div class="k">Agent branches</div><div><code>agent/&lt;crm_task_id&gt;-attempt-&lt;n&gt;</code> (same name across repos for paired work items, grep-friendly)</div>
+  <div class="k">Base branch (where agent branches off)</div><div><code>dev</code></div>
+  <div class="k">PR target branch</div><div><code>dev</code></div>
+  <div class="k">Agent's access to <code>main</code></div><div><strong>Zero.</strong> Branch protection on <code>main</code> explicitly denies the agent's GitHub PAT. Belt-and-suspenders alongside the in-agent prohibition.</div>
+  <div class="k">Promotion <code>dev</code> → <code>main</code></div><div>Manual, on the team's existing cadence. Not the agent's concern.</div>
+  <div class="k">Hotfixes</div><div>If a hotfix needs to skip <code>dev</code>, a human files the PR directly to <code>main</code>. The agent never does.</div>
+</div>
+
+<h3>8.2 Branch protection rules to configure (do this once, before Wedge 4)</h3>
+<table>
+  <thead><tr><th>Branch</th><th>Rule</th></tr></thead>
+  <tbody>
+    <tr><td><code>main</code></td><td>Restrict pushes to: Chris + team. Agent PAT NOT in allow-list. Required reviews: 1. No force-push. No deletions.</td></tr>
+    <tr><td><code>dev</code></td><td>Restrict direct pushes (force PR-only). Agent PAT can OPEN PRs targeting dev but cannot push directly. Required reviews: 1 (human). No force-push. No deletions.</td></tr>
+    <tr><td><code>agent/*</code></td><td>No protection. Agent has full write. Auto-delete after PR merge.</td></tr>
+  </tbody>
+</table>
+
+<h3>8.3 PR creation</h3>
+<p>One PR per in-scope repo. PR body = reviewer's structured report (§7.2). PR title:</p>
+<pre><code>[agent][&lt;tenant&gt;][&lt;crm_task_id&gt;] &lt;short summary&gt; → dev</code></pre>
+<p>Insert one row per PR into <code>agent_run_prs</code> with <code>pr_number</code>, <code>pr_url</code>, <code>pr_state='open'</code>.</p>
+
+<!-- ===================================================================== -->
+<h2 id="md">9. MD instruction files Claude needs</h2>
+
+<p>The agents read instruction files at runtime. Each file is hot-reloadable — change the file, the next invocation picks up the change without redeploying. List of every MD file Adam needs to create, where it lives, and what's in it.</p>
+
+<h3>9.1 <code>AgentBoxDev/prompts/triage.system.md</code> <span class="tag tag-new">NEW</span></h3>
+<p>System prompt for the triage worker (§3). Skeleton:</p>
+<pre><code># Triage Agent System Prompt
+
+You are the triage agent for the CRM self-repair pipeline. A tenant
+customer has reported a bug or requested a feature on their CRM kanban
+board. Your job:
+
+1. Read the report carefully.
+2. Use `gh_search_code` and `gh_get_file` to understand which repos
+   and files are affected. Search both CRMBackend and CRMFrontEnd
+   unless the report obviously implies one.
+3. Decide scope: `fe`, `be`, `both`, or `skip`.
+4. Write precise acceptance criteria (GIVEN/WHEN/THEN/AND NOT).
+5. Write a minimal reproducer using `./bin/setup --agent`.
+6. Write a Playwright (or BE integration) test stub. Be specific —
+   the implementer cannot modify this test.
+7. Output a single JSON object matching the schema below.
+
+## When to scope=skip
+
+- Schema migrations needed (out of v1 scope)
+- Breaking API change required (use `BLOCKED: needs-coordinated-deploy`)
+- Cross-cutting refactor (humans need to plan)
+- Insufficient detail (set `skip_reason: 'needs-clarification'`)
+- Cannot reproduce on dev seed (set `skip_reason: 'needs-tenant-data'`)
+
+## Output schema
+
+{ scope, skip_reason?, areas, files_touched, acceptance_md,
+  reproducer_md, test_stub_md, labels, confidence, reasoning }
+
+## Hard rules
+
+- Never invent file paths. Always confirm via `gh_get_file`.
+- Be specific about user roles in acceptance criteria.
+- The test stub must compile (TypeScript) and use real selectors —
+  no placeholder `// TODO` comments.
+- If confidence &lt; 0.6, scope=skip with reason.
+</code></pre>
+
+<h3>9.2 <code>AgentBoxDev/prompts/implementer.system.md</code> <span class="tag tag-new">NEW</span></h3>
+<p>Driven from <code>WORKFLOW.md</code> in DevTemplate (v0.2 spec Appendix A). Pulls into the runner VM. Body matches Appendix A of the v0.2 spec — keep it there as the canonical source.</p>
+
+<h3>9.3 <code>AgentBoxDev/prompts/reviewer.system.md</code> <span class="tag tag-new">NEW</span></h3>
+<pre><code># Reviewer Agent System Prompt
+
+You are the reviewer for an agent-opened PR. You run three checks:
+security/structural, feature-flag gating, and regression/blast-radius.
+Your output is the PR body verbatim — write it with a human reader
+in mind (Chris).
+
+## Check 1 — Security &amp; structural
+
+Invoke the `/security-review` skill. Collect all findings. Mark
+PASS if zero critical and zero high findings. Surface medium
+findings as advisory.
+
+Plus, look for:
+- New endpoints without input validation (zod, class-validator)
+- Unawaited promises in async flows
+- Missing tenant isolation checks (look for `TenantMiddleware` /
+  `PrismaService.getClient(tenantId)` patterns)
+- Logging that could leak PII (raw request bodies, full user objects)
+
+## Check 2 — Feature-flag gating
+
+Read `.claude/REVIEW_RULES.md` in each touched repo. For every new
+code path in a "company-specific" area listed there, confirm a flag
+exists. Static-analyze first. Only ask yourself "is this company
+specific?" for ambiguous cases.
+
+The repo memory: **"Company-specific features must be feature-flagged."**
+
+## Check 3 — Regression / blast-radius
+
+Run, in order:
+1. The new acceptance test (headless, then headed with video).
+2. The full existing suite in each touched repo.
+3. 5 adjacent test files (you pick — by import graph + path).
+4. 3-5 adjacent Playwright flows (you pick — by feature proximity).
+5. Additive-only check: confirm no existing route, DTO field,
+   status code, or Prisma column was renamed, removed, or had
+   semantic change.
+
+## Output
+
+Markdown document matching the template in §7.2 of the build plan.
+Be honest. Soft-warn medium findings; hard-fail anything else.
+</code></pre>
+
+<h3>9.4 <code>CRMBackend/CLAUDE.md</code> and <code>CRMFrontEnd/CLAUDE.md</code> <span class="tag tag-ext">EXTEND</span></h3>
+<p>These already exist (or partial). Add sections:</p>
+<ul>
+  <li><strong>Agent etiquette</strong> — branch from <code>dev</code>, target <code>dev</code>, never <code>main</code></li>
+  <li><strong>Test conventions</strong> — where Playwright lives, naming convention <code>feedback-&lt;crm_task_id&gt;.spec.ts</code>, how to run them locally</li>
+  <li><strong>Feature-flag conventions</strong> — where flags are defined, how to add a new one, how to check at runtime, list of "always company-specific" areas</li>
+  <li><strong>Tenant isolation</strong> — the middleware / Prisma client pattern</li>
+  <li><strong>Don't do this</strong> — list of common agent mistakes (mocking the DB in tests, skipping migrations, removing CLAUDE.md files)</li>
+</ul>
+
+<h3>9.5 <code>CRMBackend/.claude/REVIEW_RULES.md</code> and <code>CRMFrontEnd/.claude/REVIEW_RULES.md</code> <span class="tag tag-new">NEW</span></h3>
+<p>Per-repo review rules read by the reviewer agent. Skeleton:</p>
+<pre><code># CRMBackend Review Rules
+
+## Company-specific areas (must be feature-flagged)
+- `src/portal/**` — tenant portal endpoints
+- `src/billing/**` — billing integration (tenant-specific providers)
+- `src/integrations/&lt;tenant&gt;/**` — anything under a tenant folder
+- Anything that imports from `@/config/tenant-features`
+
+## Generic areas (no flag needed)
+- `src/auth/**` — applies to all tenants identically
+- `src/rbac/**`
+- `src/common/**`
+- Anything in `src/prisma/` (schema/migrations)
+
+## Known fragile areas (touch → mandatory regression in linked tests)
+- `src/tickets/sla.service.ts` → run `sla.service.spec.ts` + cron tests
+- `src/tasks/tasks.service.ts` → run kanban webhook tests
+- `src/auth/firebase.guard.ts` → run all auth integration tests
+
+## Breaking API changes — never allowed in an agent PR
+- Removing a controller route
+- Renaming a DTO field
+- Changing a status code on an existing endpoint
+- Reordering required parameters
+- Changing a response field's type or nullability
+</code></pre>
+
+<h3>9.6 <code>DevTemplate/WORKFLOW.md</code> <span class="tag tag-exists">DEFERRED</span></h3>
+<p>Specified in v0.2 spec Appendix A. <strong>Not needed for v1 under the Actions-first plan</strong> — DevTemplate isn't on the agent path anymore. Implementer reads its prompt from <code>AgentBoxDev/prompts/implementer.system.md</code> instead, fetched at workflow runtime. Keep WORKFLOW.md on the backlog for when DevTemplate gets the headless-agent treatment (post-v1).</p>
+
+<h3>9.7 Summary of the MD file tree (what Adam creates)</h3>
+<pre><code>AgentBoxDev/
+├── prompts/
+│   ├── triage.system.md        ← Wedge 1
+│   ├── implementer.system.md   ← Wedge 2
+│   └── reviewer.system.md      ← Wedge 3
+
+CRMBackend/
+├── CLAUDE.md                   ← EXTEND (Wedge 2)
+├── .claude/
+│   └── REVIEW_RULES.md         ← Wedge 3
+├── bin/
+│   └── setup-ci.sh             ← Wedge 2 (thin headless setup for Actions)
+└── .github/workflows/
+    ├── agent-implement.yml     ← Wedge 2
+    ├── agent-review.yml        ← Wedge 3
+    └── agent-rework.yml        ← Wedge 4
+
+CRMFrontEnd/
+├── CLAUDE.md                   ← EXTEND (Wedge 2)
+├── .claude/
+│   └── REVIEW_RULES.md         ← Wedge 3
+├── bin/
+│   └── setup-ci.sh             ← Wedge 2
+└── .github/workflows/
+    ├── agent-implement.yml     ← Wedge 2
+    ├── agent-review.yml        ← Wedge 3
+    └── agent-rework.yml        ← Wedge 4
+
+DevTemplate/
+└── WORKFLOW.md                 ← DEFERRED (not needed for v1)
+</code></pre>
+
+<!-- ===================================================================== -->
+<h2 id="sam">10. Coordination with Sam</h2>
+
+<p>Sam's project-management UI in the dashboard is the human window into the agent loop. He doesn't have to wait for Adam — schema is the contract. Adam and Sam work in parallel.</p>
+
+<h3>10.1 What Sam needs to build (in AgentBoxDashboard)</h3>
+<table>
+  <thead><tr><th>View</th><th>What it shows</th><th>Reads from</th></tr></thead>
+  <tbody>
+    <tr><td>Live agent runs</td><td>Current runs across all tenants — state, scope, attempt #, elapsed time, work item link</td><td><code>agent_runs JOIN mcp_feedback_tasks</code></td></tr>
+    <tr><td>Per-work-item drill-down</td><td>All attempts, all PRs, all evidence (videos, transcripts), workpad history</td><td><code>agent_runs + agent_run_prs + agent_run_events</code></td></tr>
+    <tr><td>Blocked queue</td><td>Work items in <code>state='blocked'</code> with failure reason — humans triage from here</td><td><code>mcp_feedback_tasks WHERE state='blocked'</code></td></tr>
+    <tr><td>Approve / request rework</td><td>Buttons on PR cards that call <code>gh pr merge</code> or post a <code>/rework</code> comment</td><td>Write-through to GH</td></tr>
+    <tr><td>Budget burndown</td><td>Daily cost across all runs; per-tenant breakdown</td><td><code>agent_runs.cost_estimate_usd</code></td></tr>
+  </tbody>
+</table>
+
+<h3>10.2 Doesn't depend on Adam's work</h3>
+<p>As soon as the schema migrations from Wedge 1 land, Sam can build all of this with the tables empty. By the time Adam has Wedge 4 (implementer + PRs) running, Sam's UI is ready to display the live data.</p>
+
+<!-- ===================================================================== -->
+<h2 id="wedges">11. Build sequence — four wedges</h2>
+
+<p>Each wedge is independently shippable. Each has an explicit "done" criterion. Don't move on until the previous wedge's exit gate is green. v0.3.1 collapses the v0.3 plan's Wedges 2-3-4 into a single Actions-based wedge, and drops the orchestrator daemon for v1 (GitHub events do the dispatch instead).</p>
+
+<h3>Wedge 1 — Schema + Triage worker <span class="tag tag-w1">~1 week</span></h3>
+<table>
+  <tbody>
+    <tr><th>Deliverables</th><td>
+      <ul>
+        <li>Migrations: state machine columns on <code>mcp_feedback_tasks</code>; new tables <code>mcp_feedback_task_issues</code>, <code>agent_runs</code>, <code>agent_run_prs</code>, <code>agent_run_events</code></li>
+        <li>New file <code>AgentBoxDev/triage.mjs</code></li>
+        <li>New file <code>AgentBoxDev/tools/github.mjs</code> with <code>ghSearchCode</code>, <code>ghGetFile</code></li>
+        <li>New file <code>AgentBoxDev/prompts/triage.system.md</code></li>
+        <li><code>setImmediate</code> wiring in <code>server.js</code> webhook handler</li>
+        <li>Safety poller</li>
+      </ul>
+    </td></tr>
+    <tr><th>Out of scope</th><td>Implementer; reviewer; PR opening; GitHub Actions wiring</td></tr>
+    <tr><th>Exit gate</th><td>File a test bug in the dev tenant. Within 60s see: row in <code>mcp_feedback_tasks</code> with <code>state='planned'</code>, 1-2 rows in <code>mcp_feedback_task_issues</code>, 1-2 issues opened in <code>DAAITeam/CRMBackend</code> or <code>DAAITeam/CRMFrontEnd</code> with full acceptance criteria + test stub.</td></tr>
+    <tr><th>Migration note</th><td>Adam writes the migration file. <strong>Chris runs the migration</strong> (per project policy).</td></tr>
+  </tbody>
+</table>
+
+<h3>Wedge 2 — Implementer Action + manual PR <span class="tag tag-w2">~1-1.5 weeks</span></h3>
+<table>
+  <tbody>
+    <tr><th>Deliverables</th><td>
+      <ul>
+        <li><code>.github/workflows/agent-implement.yml</code> in CRMBackend and CRMFrontEnd</li>
+        <li>Repo-local <code>./bin/setup-ci.sh</code> in each repo — thin headless setup (Postgres + seed + servers) for the Actions runner. <strong>No DevTemplate dependency.</strong></li>
+        <li><code>AgentBoxDev/prompts/implementer.system.md</code></li>
+        <li>Pre-commit hook in the workflow that pins the test file's hash (blocks modification)</li>
+        <li>Branch protection on <code>main</code> + <code>dev</code> configured at GitHub</li>
+        <li>Agent's GitHub PAT scoped to <code>agent/*</code> branches only — cannot push to <code>main</code> or <code>dev</code></li>
+        <li>Workflow opens <code>gh pr create --base dev</code> with a stub PR body (no reviewer report yet — that's Wedge 3)</li>
+      </ul>
+    </td></tr>
+    <tr><th>Out of scope</th><td>Reviewer agent; per-tenant config</td></tr>
+    <tr><th>Exit gate</th><td>Manually label a known issue <code>agent-eligible</code>. Within 30 min: Action runs, agent branch pushed, PR opened against <code>dev</code> with valid diff. Chris eyeballs and merges.</td></tr>
+    <tr><th>Parallel</th><td>Can run in parallel with Wedge 1 (different surfaces).</td></tr>
+  </tbody>
+</table>
+
+<h3>Wedge 3 — Reviewer Action <span class="tag tag-w3">~1-2 weeks</span></h3>
+<table>
+  <tbody>
+    <tr><th>Deliverables</th><td>
+      <ul>
+        <li><code>.github/workflows/agent-review.yml</code> in each repo</li>
+        <li><code>AgentBoxDev/prompts/reviewer.system.md</code></li>
+        <li>Per-repo <code>.claude/REVIEW_RULES.md</code></li>
+        <li>Three checks running: <code>/security-review</code> invocation, feature-flag gating check, regression + adjacent + additive-only check</li>
+        <li>Structured Markdown report → PR body (replaces Wedge 2's stub)</li>
+        <li>FAIL path: issue comment + <code>state:blocked-needs-human</code> label; do NOT open PR</li>
+        <li>Playwright videos uploaded as Action artifacts, linked from PR body</li>
+      </ul>
+    </td></tr>
+    <tr><th>Exit gate</th><td>Trigger on three known work items (1 with security issue, 1 missing flag, 1 clean). Confirm: security issue is blocked with finding on the source issue; flag issue is blocked; clean one opens PR with full structured report and a viewable Playwright video. Chris reviews — does the report tell him what he needs to know?</td></tr>
+  </tbody>
+</table>
+
+<h3>Wedge 4 — Rework loop + polish <span class="tag tag-w4">~1 week</span></h3>
+<table>
+  <tbody>
+    <tr><th>Deliverables</th><td>
+      <ul>
+        <li><code>.github/workflows/agent-rework.yml</code> — triggered by <code>pull_request_review</code> with state <code>changes_requested</code> or by <code>/rework</code> comment on the source issue</li>
+        <li>Rework path: close existing agent PR (not merge), delete agent branch, re-fire <code>agent-implement.yml</code> with new attempt number; carry forward the reviewer feedback</li>
+        <li>Retry path: on Action failure (not reviewer failure), re-fire up to 3 times with exponential backoff (use workflow scheduled rerun)</li>
+        <li>Adjacent-flow smoke on by default in reviewer</li>
+        <li>Action artifacts copied to GCS for long-term retention (Actions only keeps 90 days)</li>
+        <li>Cost tracking surfaced on agent_runs row (workflow uploads token usage at end)</li>
+      </ul>
+    </td></tr>
+    <tr><th>Exit gate</th><td>Unattended for 48h. File 10 test bugs from dev tenant. Some succeed, some block, some rework. None crash. Budget burndown visible in dashboard. Chris merges the good ones; the rest sit in <code>blocked</code> with clear reasons.</td></tr>
+  </tbody>
+</table>
+
+<h3>Total: ~4-5 weeks for v1</h3>
+
+<p class="small">When (if) v1 outgrows GitHub Actions, lift-and-shift to a self-hosted runner first (single GCE box, no code changes — just change <code>runs-on</code>). Only build the full custom GCE image / orchestrator path from the v0.2 spec if real usage data justifies it.</p>
+
+<!-- ===================================================================== -->
+<h2 id="open">12. Open decisions for Chris</h2>
+
+<p>These don't block Wedge 1, but Adam needs answers before later wedges.</p>
+
+<table>
+  <thead><tr><th>Decision</th><th>Needed by</th><th>Options</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Actions runner — GitHub-hosted (ubuntu-latest) vs self-hosted GCE from day one</td>
+      <td>Wedge 2</td>
+      <td><strong>Recommend GitHub-hosted for v1.</strong> Zero setup. Move to self-hosted only when (a) monthly Actions bill exceeds $300, (b) the 60-min cap blocks too many runs, or (c) per-tenant seeded data warrants a custom image. Lift-and-shift is a <code>runs-on</code> label change.</td>
+    </tr>
+    <tr>
+      <td>Reviewer fail mode — hard fail (block PR) vs soft warn (open PR with warnings)</td>
+      <td>Wedge 3</td>
+      <td><strong>Recommend hard fail.</strong> The point of the reviewer is to lower Chris's review burden. Soft-warns push the burden back to Chris.</td>
+    </tr>
+    <tr>
+      <td>Budget caps — per-work-item Anthropic spend</td>
+      <td>Wedge 3</td>
+      <td><strong>Recommend $15 per work item single repo, $20 paired.</strong> Concurrency caps move to GitHub Actions concurrency groups (one run per work item; queue the rest).</td>
+    </tr>
+    <tr>
+      <td>Does <code>dev</code> branch exist in CRMBackend and CRMFrontEnd today?</td>
+      <td>Wedge 2 (before branch protection setup)</td>
+      <td>If not: create it from <code>main</code> first. Audit existing PRs to confirm no one is using <code>main</code> as the integration branch already. <strong>This is the #1 blocker for Wedge 2.</strong></td>
+    </tr>
+    <tr>
+      <td>Agent GitHub PAT — who owns it?</td>
+      <td>Wedge 2</td>
+      <td>Create a dedicated GitHub App or fine-grained PAT scoped to: read access on CRMBackend + CRMFrontEnd, write access to <code>agent/*</code> branches only, can create PRs, can comment on issues. Stored in repo Actions secrets as <code>AGENT_GH_TOKEN</code>.</td>
+    </tr>
+    <tr>
+      <td>What happens to dev-merged PRs that break the dev environment?</td>
+      <td>Post-v1</td>
+      <td>Defer — humans handle this for v1. Long-term: dev-environment health monitor that auto-reverts agent PRs if dev smoke fails after merge.</td>
+    </tr>
+    <tr>
+      <td>When (if ever) do we unify the admin-dashboard <code>/api/bug-reports</code> intake?</td>
+      <td>Post-v1</td>
+      <td>Defer. Dev-tenant submissions cover testing. Revisit when ops files enough internal bugs to feel the gap.</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr/>
+<p class="small">End of build plan. Companion to v0.2 spec. Send questions to Chris.</p>
+
+</body>
+</html>
