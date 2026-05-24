@@ -32,6 +32,7 @@
 - [x] Collaboration scaffolding committed + merged to main (PR #5, 2026-05-24)
 - [x] ADR 0001 decided — GitHub App. Adam proceeds with App creation per Implementation notes in the ADR
 - [x] Confirmed `dev` branch exists in both `DAAITeam/CRMBackend` and `DAAITeam/CRMFrontEnd` (unprotected — see Blocked section)
+- [x] Migration `001_self_repair_pipeline.sql` applied to `agentbox-db-mcp` (2026-05-24). Verified: 4 new tables present (`mcp_feedback_task_issues`, `agent_runs`, `agent_run_prs`, `agent_run_events`); `mcp_feedback_tasks` has all 14 new columns including `state`, `agent_eligible`, `scope`, `acceptance_md`, `synthesized_bug_md`, `proposed_fix_md`. No legacy rows needed backfill (0 rows had `github_issue_number IS NOT NULL`).
 
 ### In progress
 *(Adam fills this as he starts work)*
@@ -41,7 +42,6 @@
 - [ ] Safety poller (60s tick, claims pending rows older than 1 min)
 
 ### Blocked / needs Chris
-- [ ] **Apply migration `001_self_repair_pipeline.sql`** — Chris-only per project policy. Command: `psql $DATABASE_URL -f migrations/001_self_repair_pipeline.sql`. Idempotent; safe to dry-run inside `BEGIN; ... ROLLBACK;` first if paranoid.
 - [ ] **Configure branch protection** on `main` + `dev` in `DAAITeam/CRMBackend` and `DAAITeam/CRMFrontEnd` before Wedge 2 ships. Both `dev` branches exist but are currently unprotected. Rules: agent App denied write on `main`; agent App can open PRs on `dev` but not push directly.
 - [ ] **`dev` branches are stale** (~March 2026 last commit in both repos). Decide before Wedge 2: fast-forward `dev` to `main`, or treat the existing `dev` as an integration branch that diverges intentionally. Adam's agent branches need to be created from a `dev` that mirrors current `main` behavior — otherwise PRs against `dev` won't reflect production reality.
 
@@ -73,3 +73,4 @@ None yet.
 - **2026-05-26** — Adam's idea wired in: triage now produces `synthesized_bug_md` (technical restatement) + `proposed_fix_md` (suggested shape). Two new columns added to `001_self_repair_pipeline.sql` (still unapplied). Triage prompt updated with Steps 5 and 8 and updated schema/example. Reviewer's Check 3 will gain a "diff resembles proposed shape?" substep when Wedge 3 lands. Catches the "test passes but fix is wrong-shaped" failure mode.
 - **2026-05-26** — Auto-pull hook added at `.claude/settings.json`: both Claudes run `git pull --rebase --autostash` on session start.
 - **2026-05-24** — PR #5 (scaffolding) merged to main. ADR 0001 decided: GitHub App. `dev` branches confirmed in both CRM repos (unprotected; staleness flagged for Chris).
+- **2026-05-24** — Migration 001 applied to `agentbox-db-mcp`. Adam unblocked to start `tools/github.mjs` + `triage.mjs`.
