@@ -74,3 +74,4 @@ None yet.
 - **2026-05-26** — Auto-pull hook added at `.claude/settings.json`: both Claudes run `git pull --rebase --autostash` on session start.
 - **2026-05-24** — PR #5 (scaffolding) merged to main. ADR 0001 decided: GitHub App. `dev` branches confirmed in both CRM repos (unprotected; staleness flagged for Chris).
 - **2026-05-24** — Migration 001 applied to `agentbox-db-mcp`. Adam unblocked to start `tools/github.mjs` + `triage.mjs`.
+- **2026-05-24** — **Scope narrowed: v1 = BUG only.** `FEATURE_REQUEST`, `IMPROVEMENT`, `QUESTION` short-circuited at the triage worker (mark `state='canceled'`, `skip_reason='non-bug-v1-out-of-scope'`, no Sonnet call). Defense-in-depth rule added to triage system prompt. Build plan §1 + §3.3 updated. Re-evaluate `IMPROVEMENT` after ~50 BUG runs.

@@ -185,6 +185,12 @@
       <td>Saves 2 days. Path A (tenant CRM) is the real volume. Testing the loop = file bugs through the dev tenant's CRM, not the admin dashboard.</td>
     </tr>
     <tr>
+      <td>Task types in scope</td>
+      <td>Not specified (treated <code>BUG</code>, <code>FEATURE_REQUEST</code>, <code>IMPROVEMENT</code>, <code>QUESTION</code> equivalently)</td>
+      <td><strong>v1 handles <code>type = 'BUG'</code> only.</strong> <code>FEATURE_REQUEST</code>, <code>IMPROVEMENT</code>, and <code>QUESTION</code> are short-circuited at the triage worker before the Sonnet call. The triage system prompt has a defense-in-depth rule, and the worker function (§3.3) does an early type-check, marks <code>state='canceled'</code> with <code>skip_reason='non-bug-v1-out-of-scope'</code>, and returns.</td>
+      <td>Feature requests need product design discussion; improvements are fuzzy (could be tiny fixes or scope creep); questions aren't actionable as code. Bugs have a clean "fixed / not fixed" signal — start there. Re-evaluate <code>IMPROVEMENT</code> after ~50 BUG runs.</td>
+    </tr>
+    <tr>
       <td>Code context strategy</td>
       <td>Not specified explicitly (planner uses <code>gh api</code>)</td>
       <td><strong>Agentic search, no code-in-a-DB.</strong> Two <code>gh_*</code> tools the agent calls live.</td>
@@ -376,6 +382,22 @@ export async function triageFeedbackTask(taskId) {
   );
   if (claimed.rowCount === 0) return;
   const task = claimed.rows[0];
+
+  // v1: BUG only. Short-circuit non-bug types before the Sonnet call
+  // (defense in depth: the triage system prompt also enforces this).
+  if (task.type !== 'BUG') {
+    await db.query(
+      `UPDATE mcp_feedback_tasks
+          SET state = 'canceled',
+              planner_status = 'skipped',
+              planner_finished_at = NOW(),
+              skip_reason = 'non-bug-v1-out-of-scope',
+              planner_summary = $2
+        WHERE id = $1`,
+      [taskId, `Skipped: type=${task.type}. v1 of the agent loop only handles BUG.`],
+    );
+    return;
+  }
 
   try {
     const userPrompt = renderTaskPrompt(task);

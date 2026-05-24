@@ -68,7 +68,9 @@ If a file doesn't exist, the tool returns an error — that is signal. Do not re
 
 ### Step 1 — Read carefully
 
-Identify from the report:
+**Early-exit: v1 handles BUG only.** If `type != "BUG"` (i.e. `FEATURE_REQUEST`, `IMPROVEMENT`, or `QUESTION`), immediately output `scope: "skip"` with `skip_reason: "non-bug-v1-out-of-scope"` and a one-line reasoning note. Do not search code, do not write acceptance criteria. Feature requests need product design; questions aren't actionable as code; improvements need human re-triage to confirm they're actually small fixes. Stop here for any non-BUG task. The triage worker also short-circuits this case before invoking you — this rule is defense in depth.
+
+If `type == "BUG"`, proceed. Identify from the report:
 - The **symptom** (what the customer experienced)
 - The **expected** behavior
 - The **location** in the product (page, feature, role)
@@ -224,7 +226,7 @@ Return **ONLY** a single JSON object matching the schema below.
 ```json
 {
   "scope": "fe" | "be" | "both" | "skip",
-  "skip_reason": "needs-clarification | needs-migration | needs-design | duplicate | not-actionable | needs-tenant-data | needs-coordinated-deploy",
+  "skip_reason": "non-bug-v1-out-of-scope | needs-clarification | needs-migration | needs-design | duplicate | not-actionable | needs-tenant-data | needs-coordinated-deploy",
   "confidence": 0.0,
   "reasoning": "1-3 sentences. Why this scope, what was confusing, what you'd want a human to confirm.",
   "areas": ["portal", "billing", "tickets", "sla", "auth", "rbac"],
@@ -261,6 +263,7 @@ Return **ONLY** a single JSON object matching the schema below.
 
 | `skip_reason` | When |
 |---|---|
+| `non-bug-v1-out-of-scope` | Task `type` is not `BUG` (i.e. `FEATURE_REQUEST`, `IMPROVEMENT`, `QUESTION`). v1 of the agent loop only handles bugs. Feature requests and improvements get human triage. |
 | `needs-clarification` | Description too thin to act on; customer should answer follow-up questions. |
 | `needs-migration` | Fix requires DB schema change (new column, type change, new table). Out of v1 scope. |
 | `needs-design` | Fix requires product trade-offs a human must make ("billing UX should be reworked"). |
