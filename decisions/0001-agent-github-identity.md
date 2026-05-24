@@ -1,9 +1,9 @@
 # 0001 — Agent GitHub identity
 
-**Status:** Open
+**Status:** Decided
 **Date opened:** 2026-05-26
 **Decided by:** Chris
-**Date decided:** *(filled in with Decision)*
+**Date decided:** 2026-05-24
 
 ## Context
 
@@ -66,7 +66,9 @@ The 5-minute PAT setup is tempting for Wedge 2 specifically (we just want to shi
 
 ## Decision
 
-*(Chris fills this in: which option + one-sentence why)*
+**Option A — dedicated GitHub App** (`boxai-self-repair-agent`).
+
+The cascade requirement (agent-implement push → fires agent-review workflow) eliminates Option C. Between A and B, the App's no-expiration property is worth the one-time 1-2hr setup cost — a silently-expired PAT would break the loop with no warning and is exactly the kind of operational landmine we don't want. Adam: proceed with the App creation steps in the Implementation notes section. If the JWT-exchange dance turns out to be substantially more code than expected, surface in PIPELINE_STATUS and we'll reconsider stopgap.
 
 ---
 
