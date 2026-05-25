@@ -243,8 +243,8 @@
 
 <h1>CRM Self-Repair — Status Board</h1>
 <p class="meta">
-  <strong>Last updated:</strong> 2026-05-24 by Chris's Claude — Wedge 1 EXIT GATE HIT &middot;
-  <strong>Current wedge:</strong> 1 ✓ done · ready for Wedge 2 &middot;
+  <strong>Last updated:</strong> 2026-05-25 by Chris's Claude after commit <code>b87e739</code> — Wedge 2-3 drafts shipped &middot;
+  <strong>Current state:</strong> Wedge 1 ✓ done · Wedge 2-3 drafts ready, awaiting human prereqs &middot;
   <strong>Repo:</strong> <a href="https://github.com/DAAIDev/AgentBoxDev">DAAIDev/AgentBoxDev</a>
 </p>
 
@@ -267,18 +267,18 @@
     <div class="progress"><span style="width: 100%"></span></div>
   </div>
 
-  <div class="wedge todo">
+  <div class="wedge wip">
     <div class="num">Wedge 2</div>
     <div class="title">Implementer Action</div>
-    <div class="state">Not started</div>
-    <div class="progress"><span style="width: 0%"></span></div>
+    <div class="state">~60% — prompt + workflow draft + runner script ready; needs GH App</div>
+    <div class="progress"><span style="width: 60%"></span></div>
   </div>
 
-  <div class="wedge todo">
+  <div class="wedge wip">
     <div class="num">Wedge 3</div>
     <div class="title">Reviewer Action</div>
-    <div class="state">Not started</div>
-    <div class="progress"><span style="width: 0%"></span></div>
+    <div class="state">~55% — prompt + workflow draft ready; needs REVIEW_RULES.md per repo</div>
+    <div class="progress"><span style="width: 55%"></span></div>
   </div>
 
   <div class="wedge todo">
@@ -325,16 +325,16 @@
       <div class="sub">Synthesized bug + proposed fix + acceptance + reproducer + test stub. Verified — CRMBackend #212.</div>
     </div>
     <div class="arrow">→</div>
-    <div class="node todo">
+    <div class="node wip">
       <div class="title">Implementer Action (Wedge 2)</div>
-      <div class="sub">GitHub Action triggered by <code>agent-eligible</code> label · pushes <code>agent/*</code> branch</div>
+      <div class="sub">YAML + agent-runner.mjs + system prompt all drafted in <code>docs/drafts/</code> · awaiting GH App + paste into CRMBackend/CRMFrontEnd</div>
     </div>
   </div>
 
   <div class="arch-row three">
-    <div class="node todo">
+    <div class="node wip">
       <div class="title">Reviewer Action (Wedge 3)</div>
-      <div class="sub">3 checks: security · feature-flag · regression+additive · PR body = structured report</div>
+      <div class="sub">3 checks: security · feature-flag · regression+additive+shape-match · system prompt + workflow YAML drafted · awaiting per-repo REVIEW_RULES.md</div>
     </div>
     <div class="arrow">→</div>
     <div class="node todo">
@@ -393,6 +393,26 @@
 <h2>Recent activity</h2>
 
 <div class="changelog">
+  <div class="row">
+    <span class="date">2026-05-25</span>
+    <span><strong>Wedge 2-3 drafts shipped</strong> · <code>b87e739</code> — 925 lines: workflow YAMLs + agent-runner.mjs (7 subcommands) + setup-ci.sh.template + README in <code>docs/drafts/</code>. Ready to paste into CRMBackend/CRMFrontEnd once GH App exists.</span>
+  </div>
+  <div class="row">
+    <span class="date">2026-05-25</span>
+    <span><strong>Cloud Run deploy fixed</strong> · <code>adea6d6</code> — Dockerfile had been silently broken since early May (missing COPY for kanban-github-sync.mjs). Live service now has triage code (dormant via ENABLE_TRIAGE_WORKER=false).</span>
+  </div>
+  <div class="row">
+    <span class="date">2026-05-25</span>
+    <span><strong>Reviewer prompt</strong> · <code>91e79cb</code> — ~500-line reviewer.system.md (3 checks, shape-match substep wired in)</span>
+  </div>
+  <div class="row">
+    <span class="date">2026-05-25</span>
+    <span><strong>Implementer prompt</strong> · <code>32a342f</code> — ~450-line implementer.system.md with triage-inaccurate escape hatch</span>
+  </div>
+  <div class="row">
+    <span class="date">2026-05-24</span>
+    <span><strong>Wedge 1 EXIT GATE HIT</strong> · <code>8911e52</code> — smoke test E2E verified, opened CRMBackend #212 (closed, cleaned up)</span>
+  </div>
   <div class="row">
     <span class="date">2026-05-24</span>
     <span><strong>Wedge 1 code-complete</strong> · <code>6432adc</code> — triage.mjs worker + safety poller + server.js wiring (gated by ENABLE_TRIAGE_WORKER)</span>
