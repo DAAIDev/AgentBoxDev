@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# bin/setup-ci.sh — template
+#
+# Headless local stack for GitHub Actions runners. Brings up Postgres
+# + servers so the agent (implementer / reviewer) can run tests
+# against a real local environment.
+#
+# Differs per repo:
+#   - CRMBackend  → run prisma migrate + seed, start NestJS on :3001
+#   - CRMFrontEnd → start Next.js dev server on :3000 (no DB of its own;
+#                   talks to the BE if both are in scope)
+#
+# Adapt accordingly. Run from repo root.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+
+DATABASE_URL="${DATABASE_URL:-postgres://ci:ci@localhost:5432/ci}"
+export DATABASE_URL
+
+echo "[setup-ci] DATABASE_URL=$DATABASE_URL"
+
+# ---------- CRMBackend variant ----------
+if [[ -f "prisma/schema.prisma" ]]; then
+  echo "[setup-ci] CRMBackend detected"
+
+  # Wait for Postgres
+  for i in {1..30}; do
+    if pg_isready -h localhost -p 5432 -U ci >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+
+  # Migrate + seed
+  npx prisma generate
+  npx prisma migrate deploy
+  # Optional: seed if a seed script exists. Comment in if needed.
+  # npm run seed:ci
+
+  # Start the BE in the background. Adapter writes a PID file.
+  PORT=3001 NODE_ENV=test npm run start:dev > /tmp/be.log 2>&1 &
+  echo $! > /tmp/be.pid
+
+  # Wait for /health
+  for i in {1..60}; do
+    if curl -fsS http://localhost:3001/health >/dev/null 2>&1; then
+      echo "[setup-ci] CRMBackend ready on :3001"
+      break
+    fi
+    sleep 1
+  done
+
+  if ! curl -fsS http://localhost:3001/health >/dev/null 2>&1; then
+    echo "[setup-ci] CRMBackend failed to start; last 50 log lines:"
+    tail -50 /tmp/be.log
+    exit 1
+  fi
+fi
+
+# ---------- CRMFrontEnd variant ----------
+if [[ -f "next.config.js" ]] || [[ -f "next.config.mjs" ]] || [[ -f "next.config.ts" ]]; then
+  echo "[setup-ci] CRMFrontEnd detected"
+
+  # If the FE talks to a remote BE in dev, expose it via NEXT_PUBLIC_API_URL.
+  # If the BE is in the same job (paired scope, FE+BE in one runner), it's
+  # on localhost:3001 from the block above.
+  : "${NEXT_PUBLIC_API_URL:=http://localhost:3001}"
+  export NEXT_PUBLIC_API_URL
+
+  # Start FE in background
+  PORT=3000 npm run dev > /tmp/fe.log 2>&1 &
+  echo $! > /tmp/fe.pid
+
+  # Wait for the dev server to bind
+  for i in {1..90}; do
+    if curl -fsS http://localhost:3000 >/dev/null 2>&1; then
+      echo "[setup-ci] CRMFrontEnd ready on :3000"
+      break
+    fi
+    sleep 1
+  done
+
+  if ! curl -fsS http://localhost:3000 >/dev/null 2>&1; then
+    echo "[setup-ci] CRMFrontEnd failed to start; last 50 log lines:"
+    tail -50 /tmp/fe.log
+    exit 1
+  fi
+fi
+
+echo "[setup-ci] Stack up. Tests can run against it now."

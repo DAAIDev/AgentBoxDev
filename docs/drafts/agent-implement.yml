@@ -1,0 +1,161 @@
+# .github/workflows/agent-implement.yml
+#
+# Wedge 2 implementer workflow. Fires when an issue is labeled
+# `agent-eligible` (which the triage worker in AgentBoxDev does after
+# producing the spec). One job: bring up the local stack, create the
+# agent branch, commit the pre-written test, invoke Claude Code with
+# the implementer system prompt, push the branch.
+#
+# Does NOT open the PR — that's agent-review.yml's job after the
+# reviewer's three checks pass.
+#
+# Prereqs:
+#   - GitHub App `boxai-self-repair-agent` installed on this repo
+#   - Secrets: AGENT_GH_APP_ID, AGENT_GH_APP_PRIVATE_KEY, ANTHROPIC_API_KEY
+#   - bin/setup-ci.sh exists in this repo
+#   - The system prompt is vendored at .claude/agent-prompts/implementer.system.md
+#     (synced from AgentBoxDev/prompts/implementer.system.md — see scripts/sync-agent-prompts.mjs)
+
+name: Agent — implement
+
+on:
+  issues:
+    types: [labeled]
+
+permissions: {}   # we use the App token, not the default GITHUB_TOKEN
+
+concurrency:
+  # One run per issue. Re-labeling a running issue cancels the prior attempt.
+  group: agent-implement-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  implement:
+    if: github.event.label.name == 'agent-eligible'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50   # hard cap; matches build plan §6 stopping conditions
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      WORK_ITEM_ISSUE_NUMBER: ${{ github.event.issue.number }}
+      WORK_ITEM_ISSUE_BODY: ${{ github.event.issue.body }}
+      WORK_ITEM_ISSUE_TITLE: ${{ github.event.issue.title }}
+      WORK_ITEM_LABELS: ${{ toJson(github.event.issue.labels) }}
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      # ----- Auth: mint a GitHub App installation token --------------------
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.AGENT_GH_APP_ID }}
+          private-key: ${{ secrets.AGENT_GH_APP_PRIVATE_KEY }}
+          # Default `owner+repos` scopes to the current repo
+
+      # ----- Checkout dev with the App token --------------------------------
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0   # need full history for branch creation + diff later
+
+      # ----- Identify the work item ----------------------------------------
+      - name: Parse work item fields
+        id: parse
+        run: node scripts/agent-runner.mjs parse
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        # Emits: CRM_TASK_ID, TENANT, SCOPE, ATTEMPT, AGENT_BRANCH
+
+      # ----- Toolchain -----------------------------------------------------
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Claude Code CLI
+        run: npm i -g @anthropic-ai/claude-code
+
+      # ----- Local stack ---------------------------------------------------
+      - name: Bring up local stack
+        run: bash bin/setup-ci.sh
+        env:
+          DATABASE_URL: postgres://ci:ci@localhost:5432/ci
+
+      # ----- Create agent branch + commit pre-written test ------------------
+      - name: Create agent branch
+        run: |
+          git config user.name  "boxai-self-repair-agent[bot]"
+          git config user.email "boxai-self-repair-agent[bot]@users.noreply.github.com"
+          git checkout -b "$AGENT_BRANCH" origin/dev
+        env:
+          AGENT_BRANCH: ${{ steps.parse.outputs.AGENT_BRANCH }}
+
+      - name: Write + commit pre-written test (hash-locked)
+        run: node scripts/agent-runner.mjs commit-test
+        env:
+          CRM_TASK_ID: ${{ steps.parse.outputs.CRM_TASK_ID }}
+
+      # ----- Invoke the implementer agent -----------------------------------
+      - name: Run implementer agent
+        run: node scripts/agent-runner.mjs run-implementer
+        timeout-minutes: 40
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CRM_TASK_ID: ${{ steps.parse.outputs.CRM_TASK_ID }}
+          TENANT: ${{ steps.parse.outputs.TENANT }}
+          SCOPE: ${{ steps.parse.outputs.SCOPE }}
+          ATTEMPT: ${{ steps.parse.outputs.ATTEMPT }}
+          AGENT_BRANCH: ${{ steps.parse.outputs.AGENT_BRANCH }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # ----- Push agent branch ---------------------------------------------
+      - name: Push agent branch
+        if: success()
+        run: git push origin "$AGENT_BRANCH"
+        env:
+          AGENT_BRANCH: ${{ steps.parse.outputs.AGENT_BRANCH }}
+
+      # ----- Artifacts (success OR failure) --------------------------------
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: implementer-${{ steps.parse.outputs.CRM_TASK_ID }}-attempt-${{ steps.parse.outputs.ATTEMPT }}
+          path: |
+            artifacts/
+            test-results/
+            playwright-report/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # ----- On agent BLOCKED state, label the issue ------------------------
+      - name: Mark issue blocked on failure
+        if: failure()
+        run: node scripts/agent-runner.mjs mark-blocked
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CRM_TASK_ID: ${{ steps.parse.outputs.CRM_TASK_ID }}
+          ATTEMPT: ${{ steps.parse.outputs.ATTEMPT }}

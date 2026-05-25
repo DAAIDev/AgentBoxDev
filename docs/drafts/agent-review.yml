@@ -1,0 +1,148 @@
+# .github/workflows/agent-review.yml
+#
+# Wedge 3 reviewer workflow. Fires on push to any `agent/**` branch
+# (which the implementer workflow does after editing code). Runs the
+# three checks — security, feature-flag, regression+adjacent+additive+
+# shape-match — and either opens a PR against `dev` (all checks pass)
+# or comments + labels the source issue blocked.
+#
+# Prereqs:
+#   - Same as agent-implement.yml (App, secrets, setup-ci.sh, vendored prompt)
+#   - .claude/REVIEW_RULES.md exists in this repo (Wedge 3)
+#   - System prompt vendored at .claude/agent-prompts/reviewer.system.md
+
+name: Agent — review
+
+on:
+  push:
+    branches:
+      - 'agent/**'
+
+permissions: {}
+
+concurrency:
+  # One reviewer per agent branch. New pushes cancel the previous review.
+  group: agent-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AGENT_BRANCH: ${{ github.ref_name }}   # e.g. agent/CRM-1234-attempt-1
+
+    # Skip pushes from non-App actors (humans, default GITHUB_TOKEN) so
+    # rebases / squashes by maintainers don't re-trigger a review.
+    if: github.actor == 'boxai-self-repair-agent[bot]'
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      # ----- Auth -----------------------------------------------------------
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.AGENT_GH_APP_ID }}
+          private-key: ${{ secrets.AGENT_GH_APP_PRIVATE_KEY }}
+
+      # ----- Checkout the agent branch -------------------------------------
+      - name: Checkout agent branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0   # need full history for diff against origin/dev
+
+      # ----- Identify the source issue from branch name ---------------------
+      - name: Parse branch + locate source issue
+        id: parse
+        run: node scripts/agent-runner.mjs parse-from-branch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          AGENT_BRANCH: ${{ github.ref_name }}
+        # Emits: CRM_TASK_ID, TENANT, SCOPE, ATTEMPT, ISSUE_NUMBER, ISSUE_URL
+
+      # ----- Toolchain ----------------------------------------------------
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Claude Code CLI
+        run: npm i -g @anthropic-ai/claude-code
+
+      # ----- Local stack ---------------------------------------------------
+      - name: Bring up local stack
+        run: bash bin/setup-ci.sh
+        env:
+          DATABASE_URL: postgres://ci:ci@localhost:5432/ci
+
+      # ----- Run reviewer agent (the three checks) -------------------------
+      - name: Run reviewer agent
+        run: node scripts/agent-runner.mjs run-reviewer
+        timeout-minutes: 25
+        env:
+          CRM_TASK_ID: ${{ steps.parse.outputs.CRM_TASK_ID }}
+          TENANT: ${{ steps.parse.outputs.TENANT }}
+          SCOPE: ${{ steps.parse.outputs.SCOPE }}
+          ATTEMPT: ${{ steps.parse.outputs.ATTEMPT }}
+          ISSUE_URL: ${{ steps.parse.outputs.ISSUE_URL }}
+          AGENT_BRANCH: ${{ github.ref_name }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        # Emits: REVIEWER_VERDICT={pass,fail}, REVIEWER_REPORT_FILE
+
+      # ----- On PASS: open PR against dev ----------------------------------
+      - name: Open PR
+        if: env.REVIEWER_VERDICT == 'pass'
+        run: node scripts/agent-runner.mjs open-pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CRM_TASK_ID: ${{ steps.parse.outputs.CRM_TASK_ID }}
+          TENANT: ${{ steps.parse.outputs.TENANT }}
+          ATTEMPT: ${{ steps.parse.outputs.ATTEMPT }}
+          AGENT_BRANCH: ${{ github.ref_name }}
+          ISSUE_URL: ${{ steps.parse.outputs.ISSUE_URL }}
+
+      # ----- On FAIL: comment + label issue blocked -------------------------
+      - name: Surface failure to source issue
+        if: env.REVIEWER_VERDICT == 'fail'
+        run: node scripts/agent-runner.mjs mark-blocked
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CRM_TASK_ID: ${{ steps.parse.outputs.CRM_TASK_ID }}
+          ATTEMPT: ${{ steps.parse.outputs.ATTEMPT }}
+
+      # ----- Artifacts (videos, transcripts, evidence) ---------------------
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewer-${{ steps.parse.outputs.CRM_TASK_ID }}-attempt-${{ steps.parse.outputs.ATTEMPT }}
+          path: |
+            artifacts/
+            test-results/
+            playwright-report/
+          retention-days: 30
+          if-no-files-found: ignore
