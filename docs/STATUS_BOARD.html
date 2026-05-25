@@ -243,8 +243,8 @@
 
 <h1>CRM Self-Repair — Status Board</h1>
 <p class="meta">
-  <strong>Last updated:</strong> 2026-05-24 by Chris's Claude after commit <code>6432adc</code> &middot;
-  <strong>Current wedge:</strong> 1 (code-complete; pending deploy) &middot;
+  <strong>Last updated:</strong> 2026-05-24 by Chris's Claude — Wedge 1 EXIT GATE HIT &middot;
+  <strong>Current wedge:</strong> 1 ✓ done · ready for Wedge 2 &middot;
   <strong>Repo:</strong> <a href="https://github.com/DAAIDev/AgentBoxDev">DAAIDev/AgentBoxDev</a>
 </p>
 
@@ -260,11 +260,11 @@
 
 <div class="wedges">
 
-  <div class="wedge wip">
-    <div class="num">Wedge 1</div>
+  <div class="wedge done">
+    <div class="num">Wedge 1 ✓</div>
     <div class="title">Schema + Triage worker</div>
-    <div class="state">~95% — code done, awaiting deploy</div>
-    <div class="progress"><span style="width: 95%"></span></div>
+    <div class="state">DONE — E2E verified, CRMBackend #212 (test, closed)</div>
+    <div class="progress"><span style="width: 100%"></span></div>
   </div>
 
   <div class="wedge todo">
@@ -315,14 +315,14 @@
   </div>
 
   <div class="arch-row three">
-    <div class="node wip">
+    <div class="node done">
       <div class="title">Triage worker</div>
-      <div class="sub"><code>triage.mjs</code> · Sonnet 4.6 · BUG-only · code-complete, awaiting deploy with <code>ENABLE_TRIAGE_WORKER=true</code></div>
+      <div class="sub"><code>triage.mjs</code> · Sonnet 4.6 · BUG-only · verified E2E (98s for one bug, $~0.05 in tokens)</div>
     </div>
     <div class="arrow">→</div>
-    <div class="node wip">
+    <div class="node done">
       <div class="title">1-2 GitHub issues</div>
-      <div class="sub">With synthesized bug + proposed fix + acceptance + reproducer + test stub. Will fire once deployed.</div>
+      <div class="sub">Synthesized bug + proposed fix + acceptance + reproducer + test stub. Verified — CRMBackend #212.</div>
     </div>
     <div class="arrow">→</div>
     <div class="node todo">

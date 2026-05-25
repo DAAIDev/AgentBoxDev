@@ -6,9 +6,9 @@
 > - **Keep it scannable** — three weeks from now this should still be readable in 30 seconds.
 > - When a wedge closes, move "Done" items into the cumulative changelog and reset the active sections for the next wedge.
 
-**Last updated:** 2026-05-24 by Chris's Claude (scaffolding merged to main; ADR 0001 decided)
-**Current wedge:** 1 — Schema + Triage worker (~1 week)
-**ETA:** 2026-06-02
+**Last updated:** 2026-05-24 by Chris's Claude (Wedge 1 EXIT GATE HIT — full E2E verified)
+**Current wedge:** 1 → exit gate hit; ready to flip to prod or move to Wedge 2
+**ETA:** 2026-06-02 (running ahead of plan)
 
 ---
 
@@ -39,7 +39,7 @@
 - [x] `triage.mjs` — `triageFeedbackTask(taskId, pool)` exported. Full agentic loop, BUG-only short-circuit, plan validation, persist to `mcp_feedback_tasks`, opens 1-2 issues, populates `mcp_feedback_task_issues`. Issue body includes synthesized bug, acceptance criteria, reproducer, proposed fix, pre-written test, cross-link for paired scope.
 - [x] `setImmediate(triageFeedbackTask(...))` wiring in `server.js` webhook handler. **Gated by `ENABLE_TRIAGE_WORKER=true` env var** — when false (default), falls through to legacy `pushKanbanTaskToGitHub`. Clean cutover when ready.
 - [x] Safety poller — `safetyPollTriage(pool)` exported. `setInterval` in `server.js` (also gated by `ENABLE_TRIAGE_WORKER`). Default tick 60s, configurable via `TRIAGE_POLL_MS`. Resets stuck `running` rows >5min; picks up `pending` rows >1min.
-- [~] **End-to-end smoke test** — ran [scripts/wedge1-smoke-test.mjs](./scripts/wedge1-smoke-test.mjs) against live `agentbox-db-mcp`. Code path verified end-to-end up to the Anthropic call: synthetic BUG row inserted, atomic claim worked, `triageFeedbackTask` invoked Sonnet, **failed at the API with `credit balance too low`** (HTTP 400). Error correctly caught + persisted to `planner_error`. Test row cleaned up. Remaining: top up Anthropic account, re-run, watch issues open. The code is good; this is a billing issue.
+- [x] **End-to-end smoke test passed** (2026-05-24). Inserted synthetic BUG row → triage took 98s → Sonnet decided `scope=be` with confidence 0.88 → opened CRMBackend [#212](https://github.com/DAAITeam/CRMBackend/issues/212) with full structured body: synthesized bug (776 chars, identified exact file + function), acceptance criteria (591 chars, well-formed GIVEN/WHEN/THEN), proposed fix (1004 chars, file:line specific), pre-written Playwright test stub (2542 chars). Labels correct: `agent-eligible`, `tenant:dev`, `area:auth`, `type:bug`, `priority:medium`. Test row + issue cleaned up after verification. **Wedge 1 exit gate hit.**
 
 ### Blocked / needs Chris
 - [ ] **Configure branch protection** on `main` + `dev` in `DAAITeam/CRMBackend` and `DAAITeam/CRMFrontEnd` before Wedge 2 ships. Both `dev` branches exist but are currently unprotected. Rules: agent App denied write on `main`; agent App can open PRs on `dev` but not push directly.
@@ -82,3 +82,4 @@ None yet.
 - **2026-05-24** — `server.js` wired with `setImmediate(triageFeedbackTask)` + `setInterval(safetyPollTriage)`. Both gated by `ENABLE_TRIAGE_WORKER=true` env var so the legacy single-shot classifier keeps running until we flip the flag in prod.
 - **2026-05-24** — Wedge 1 code-complete. Remaining: rotate `GITHUB_TOKEN` in Cloud Run, deploy with `ENABLE_TRIAGE_WORKER=true`, file a dev-tenant test BUG to hit the exit gate.
 - **2026-05-24** — Smoke test executed against live DB via Cloud SQL proxy. Code path verified through atomic claim → Sonnet invocation; Anthropic returned HTTP 400 (`credit balance too low`). Error caught + persisted correctly. Test row cleaned up. Added Anthropic billing as the third blocker. Smoke test script committed at [scripts/wedge1-smoke-test.mjs](./scripts/wedge1-smoke-test.mjs) — re-runnable after the API key is funded.
+- **2026-05-24** — **Wedge 1 EXIT GATE HIT.** Anthropic account topped up; smoke test re-run succeeded end-to-end. 98s triage produced a well-shaped issue at CRMBackend#212: synthesized bug pinpointed exact file + function (`http-exception.filter.ts:52`), acceptance criteria GIVEN/WHEN/THEN-formatted, proposed fix file:line specific, Playwright test stub compiled, labels correct (`agent-eligible`, `tenant:dev`, `area:auth`, `type:bug`, `priority:medium`). All DB fields populated. Issue + row cleaned up. Wedge 1 done.
