@@ -35,8 +35,7 @@
 - [x] Migration `001_self_repair_pipeline.sql` applied to `agentbox-db-mcp` (2026-05-24). Verified: 4 new tables present (`mcp_feedback_task_issues`, `agent_runs`, `agent_run_prs`, `agent_run_events`); `mcp_feedback_tasks` has all 14 new columns including `state`, `agent_eligible`, `scope`, `acceptance_md`, `synthesized_bug_md`, `proposed_fix_md`. No legacy rows needed backfill (0 rows had `github_issue_number IS NOT NULL`).
 
 ### In progress
-*(Adam fills this as he starts work)*
-- [ ] `tools/github.mjs` — `gh_search_code` + `gh_get_file` wrappers
+- [x] `tools/github.mjs` — `ghSearchCode` + `ghGetFile` + tool defs + dispatcher. Smoke-tested against live GitHub: returns 8 hits for `TenantMiddleware` search, snippets populate via `text-match` accept header, file fetch returns 117-line `package.json` with valid sha. Local `.env` `GITHUB_TOKEN` is expired (used `gh auth token` for the smoke test) — Cloud Run secret needs rotation before deploy.
 - [ ] `triage.mjs` — the worker function (see §3.3 of build plan for shape)
 - [ ] `setImmediate(triageFeedbackTask(...))` wiring in `server.js` webhook handler
 - [ ] Safety poller (60s tick, claims pending rows older than 1 min)
@@ -44,6 +43,7 @@
 ### Blocked / needs Chris
 - [ ] **Configure branch protection** on `main` + `dev` in `DAAITeam/CRMBackend` and `DAAITeam/CRMFrontEnd` before Wedge 2 ships. Both `dev` branches exist but are currently unprotected. Rules: agent App denied write on `main`; agent App can open PRs on `dev` but not push directly.
 - [ ] **`dev` branches are stale** (~March 2026 last commit in both repos). Decide before Wedge 2: fast-forward `dev` to `main`, or treat the existing `dev` as an integration branch that diverges intentionally. Adam's agent branches need to be created from a `dev` that mirrors current `main` behavior — otherwise PRs against `dev` won't reflect production reality.
+- [ ] **Rotate `GITHUB_TOKEN`** in AgentBoxDev's Cloud Run secrets. Local `.env` token is expired (verified during smoke test of `tools/github.mjs`). Triage worker can't run in production without a valid token. Same token is used by existing `kanban-github-sync.mjs` and `callGitHub` in `server.js` — they're all broken too if this is stale in prod.
 
 ### Next (after Wedge 1 exit gate)
 - Open Wedge 2 issue from [WEDGE_ISSUES.md](./WEDGE_ISSUES.md)
@@ -75,3 +75,4 @@ None yet.
 - **2026-05-24** — PR #5 (scaffolding) merged to main. ADR 0001 decided: GitHub App. `dev` branches confirmed in both CRM repos (unprotected; staleness flagged for Chris).
 - **2026-05-24** — Migration 001 applied to `agentbox-db-mcp`. Adam unblocked to start `tools/github.mjs` + `triage.mjs`.
 - **2026-05-24** — **Scope narrowed: v1 = BUG only.** `FEATURE_REQUEST`, `IMPROVEMENT`, `QUESTION` short-circuited at the triage worker (mark `state='canceled'`, `skip_reason='non-bug-v1-out-of-scope'`, no Sonnet call). Defense-in-depth rule added to triage system prompt. Build plan §1 + §3.3 updated. Re-evaluate `IMPROVEMENT` after ~50 BUG runs.
+- **2026-05-24** — `tools/github.mjs` written and smoke-tested. Exports `ghSearchCode` + `ghGetFile` + Anthropic tool defs + `runTool` dispatcher. Self-contained (no dependency on `server.js`). Uses `text-match` accept header so search returns actual code snippets, not just paths. Expired-token issue flagged for Cloud Run rotation.
