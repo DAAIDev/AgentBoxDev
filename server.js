@@ -10,6 +10,7 @@ import admin from 'firebase-admin';
 import { timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import { createKanbanGithubSync } from './kanban-github-sync.mjs';
+import { triageFeedbackTask, safetyPollTriage } from './triage.mjs';
 
 // Firebase Admin SDK for AgentBox Dashboard user management
 if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
@@ -3733,13 +3734,38 @@ app.post('/api/feedback-tasks/webhook', async (req, res) => {
       const newStatus = data.task?.status;
       if (crmTaskId) {
         if (!prevState?.github_issue_number) {
-          // No issue yet — try to create one. The claim-pattern UPDATE inside
-          // pushKanbanTaskToGitHub is idempotent: skip-if-issued, skip-if-done.
-          setImmediate(() => {
-            kanbanGithubSync
-              .pushKanbanTaskToGitHub({ tenant, crmTaskId })
-              .catch((err) => console.error('[kanban-gh-sync] push error:', err));
-          });
+          // No issue yet — kick off triage. Two paths:
+          //   ENABLE_TRIAGE_WORKER=true  → new Wedge 1 Sonnet triage agent
+          //                                (planner_status state machine,
+          //                                 synthesized_bug + proposed_fix,
+          //                                 1-2 issues for both/fe/be scope).
+          //   default                    → legacy single-shot Haiku classifier
+          //                                in kanbanGithubSync.pushKanbanTaskToGitHub.
+          if (process.env.ENABLE_TRIAGE_WORKER === 'true') {
+            setImmediate(async () => {
+              try {
+                const r = await pool.query(
+                  `SELECT id FROM mcp_feedback_tasks
+                    WHERE tenant = $1 AND crm_task_id = $2`,
+                  [tenant, crmTaskId],
+                );
+                const rowId = r.rows[0]?.id;
+                if (rowId) {
+                  await triageFeedbackTask(rowId, pool);
+                }
+              } catch (err) {
+                console.error('[triage-worker] error:', err);
+              }
+            });
+          } else {
+            // Legacy path: claim-pattern UPDATE inside pushKanbanTaskToGitHub
+            // is idempotent: skip-if-issued, skip-if-done.
+            setImmediate(() => {
+              kanbanGithubSync
+                .pushKanbanTaskToGitHub({ tenant, crmTaskId })
+                .catch((err) => console.error('[kanban-gh-sync] push error:', err));
+            });
+          }
         } else if (
           eventType === 'task.updated' &&
           prevState?.status !== 'done' &&
@@ -4629,4 +4655,19 @@ if (isMainModule) {
   app.listen(PORT, () => {
     console.log(`MCP Project Tracker running on port ${PORT}`);
   });
+
+  // Wedge 1 safety poller. Only runs when the new triage worker is
+  // enabled. Picks up rows the webhook's setImmediate missed (crash,
+  // OOM, restart mid-process) and resets rows stuck in planner_status
+  // ='running' for >5 min. Single-instance assumption — fine for now;
+  // re-evaluate if AgentBoxDev scales to multiple Cloud Run instances.
+  if (process.env.ENABLE_TRIAGE_WORKER === 'true') {
+    const POLL_INTERVAL_MS = parseInt(process.env.TRIAGE_POLL_MS || '60000', 10);
+    console.log(`[triage-poller] starting; tick every ${POLL_INTERVAL_MS}ms`);
+    setInterval(() => {
+      safetyPollTriage(pool).catch((err) =>
+        console.error('[triage-poller] error:', err),
+      );
+    }, POLL_INTERVAL_MS);
+  }
 }

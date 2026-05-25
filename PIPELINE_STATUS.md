@@ -35,10 +35,11 @@
 - [x] Migration `001_self_repair_pipeline.sql` applied to `agentbox-db-mcp` (2026-05-24). Verified: 4 new tables present (`mcp_feedback_task_issues`, `agent_runs`, `agent_run_prs`, `agent_run_events`); `mcp_feedback_tasks` has all 14 new columns including `state`, `agent_eligible`, `scope`, `acceptance_md`, `synthesized_bug_md`, `proposed_fix_md`. No legacy rows needed backfill (0 rows had `github_issue_number IS NOT NULL`).
 
 ### In progress
-- [x] `tools/github.mjs` — `ghSearchCode` + `ghGetFile` + tool defs + dispatcher. Smoke-tested against live GitHub: returns 8 hits for `TenantMiddleware` search, snippets populate via `text-match` accept header, file fetch returns 117-line `package.json` with valid sha. Local `.env` `GITHUB_TOKEN` is expired (used `gh auth token` for the smoke test) — Cloud Run secret needs rotation before deploy.
-- [ ] `triage.mjs` — the worker function (see §3.3 of build plan for shape)
-- [ ] `setImmediate(triageFeedbackTask(...))` wiring in `server.js` webhook handler
-- [ ] Safety poller (60s tick, claims pending rows older than 1 min)
+- [x] `tools/github.mjs` — `ghSearchCode` + `ghGetFile` + `createGitHubIssue` + tool defs + dispatcher. Smoke-tested live (paths and snippets verified).
+- [x] `triage.mjs` — `triageFeedbackTask(taskId, pool)` exported. Full agentic loop, BUG-only short-circuit, plan validation, persist to `mcp_feedback_tasks`, opens 1-2 issues, populates `mcp_feedback_task_issues`. Issue body includes synthesized bug, acceptance criteria, reproducer, proposed fix, pre-written test, cross-link for paired scope.
+- [x] `setImmediate(triageFeedbackTask(...))` wiring in `server.js` webhook handler. **Gated by `ENABLE_TRIAGE_WORKER=true` env var** — when false (default), falls through to legacy `pushKanbanTaskToGitHub`. Clean cutover when ready.
+- [x] Safety poller — `safetyPollTriage(pool)` exported. `setInterval` in `server.js` (also gated by `ENABLE_TRIAGE_WORKER`). Default tick 60s, configurable via `TRIAGE_POLL_MS`. Resets stuck `running` rows >5min; picks up `pending` rows >1min.
+- [ ] **End-to-end smoke test on dev tenant** — file a real BUG, observe issue opens with new shape. Requires `ENABLE_TRIAGE_WORKER=true` + valid `GITHUB_TOKEN` + `ANTHROPIC_API_KEY` in prod env.
 
 ### Blocked / needs Chris
 - [ ] **Configure branch protection** on `main` + `dev` in `DAAITeam/CRMBackend` and `DAAITeam/CRMFrontEnd` before Wedge 2 ships. Both `dev` branches exist but are currently unprotected. Rules: agent App denied write on `main`; agent App can open PRs on `dev` but not push directly.
@@ -76,3 +77,6 @@ None yet.
 - **2026-05-24** — Migration 001 applied to `agentbox-db-mcp`. Adam unblocked to start `tools/github.mjs` + `triage.mjs`.
 - **2026-05-24** — **Scope narrowed: v1 = BUG only.** `FEATURE_REQUEST`, `IMPROVEMENT`, `QUESTION` short-circuited at the triage worker (mark `state='canceled'`, `skip_reason='non-bug-v1-out-of-scope'`, no Sonnet call). Defense-in-depth rule added to triage system prompt. Build plan §1 + §3.3 updated. Re-evaluate `IMPROVEMENT` after ~50 BUG runs.
 - **2026-05-24** — `tools/github.mjs` written and smoke-tested. Exports `ghSearchCode` + `ghGetFile` + Anthropic tool defs + `runTool` dispatcher. Self-contained (no dependency on `server.js`). Uses `text-match` accept header so search returns actual code snippets, not just paths. Expired-token issue flagged for Cloud Run rotation.
+- **2026-05-24** — `triage.mjs` written. Full Sonnet agentic loop with TRIAGE_TOOLS, JSON plan validation, persist to `mcp_feedback_tasks`, opens 1-2 GH issues, populates `mcp_feedback_task_issues`. `safetyPollTriage` exported for the background poller.
+- **2026-05-24** — `server.js` wired with `setImmediate(triageFeedbackTask)` + `setInterval(safetyPollTriage)`. Both gated by `ENABLE_TRIAGE_WORKER=true` env var so the legacy single-shot classifier keeps running until we flip the flag in prod.
+- **2026-05-24** — Wedge 1 code-complete. Remaining: rotate `GITHUB_TOKEN` in Cloud Run, deploy with `ENABLE_TRIAGE_WORKER=true`, file a dev-tenant test BUG to hit the exit gate.

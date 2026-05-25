@@ -158,6 +158,45 @@ export async function ghGetFile(repo, path, ref = 'dev') {
 }
 
 /**
+ * Open a new GitHub issue in a DAAITeam repo.
+ * Used by the triage worker AFTER it has decided scope and built the
+ * issue body — NOT exposed as a tool to Claude (the agent decides
+ * what to write; the worker is what actually opens the issue).
+ *
+ * @param {string} repo - 'CRMBackend' | 'CRMFrontEnd'
+ * @param {{ title: string, body?: string, labels?: string[], assignees?: string[] }} payload
+ * @returns {Promise<{ number, url, api_url, state, title, labels, repo, created_at }>}
+ */
+export async function createGitHubIssue(repo, { title, body, labels, assignees } = {}) {
+  validateRepo(repo);
+  if (typeof title !== 'string' || title.trim().length === 0) {
+    throw new Error('title is required');
+  }
+
+  const payload = { title };
+  if (body !== undefined && body !== null) payload.body = body;
+  if (Array.isArray(labels) && labels.length > 0) payload.labels = labels;
+  if (Array.isArray(assignees) && assignees.length > 0) payload.assignees = assignees;
+
+  const issue = await callGitHub(
+    `/repos/${GITHUB_ORG}/${repo}/issues`,
+    {},
+    { method: 'POST', body: payload },
+  );
+
+  return {
+    number: issue.number,
+    url: issue.html_url,
+    api_url: issue.url,
+    state: issue.state,
+    title: issue.title,
+    labels: (issue.labels || []).map((l) => (typeof l === 'string' ? l : l.name)),
+    repo,
+    created_at: issue.created_at,
+  };
+}
+
+/**
  * Anthropic tool definition for gh_search_code.
  * Include in messages.create({ tools }).
  */
