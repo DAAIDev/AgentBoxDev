@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CRM Self-Repair — Status Board</title>
+<style>
+  :root {
+    --done: #16a34a;
+    --done-bg: #f0fdf4;
+    --done-border: #86efac;
+    --wip: #d97706;
+    --wip-bg: #fffbeb;
+    --wip-border: #fcd34d;
+    --todo: #64748b;
+    --todo-bg: #f8fafc;
+    --todo-border: #cbd5e1;
+    --blocked: #b91c1c;
+    --blocked-bg: #fef2f2;
+    --blocked-border: #fca5a5;
+    --ink: #0f172a;
+    --muted: #64748b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    max-width: 1180px;
+    margin: 32px auto;
+    padding: 0 24px 80px;
+    color: var(--ink);
+    line-height: 1.55;
+    background: #ffffff;
+  }
+  h1 {
+    font-size: 26px;
+    margin: 0 0 4px;
+    border-bottom: 2px solid #1e3a8a;
+    padding-bottom: 8px;
+    color: #0f172a;
+  }
+  .meta {
+    color: var(--muted);
+    font-size: 13px;
+    margin: 6px 0 28px;
+  }
+  .meta strong { color: var(--ink); }
+  h2 {
+    font-size: 19px;
+    margin-top: 40px;
+    color: #1e3a8a;
+    border-top: 1px solid #e2e8f0;
+    padding-top: 18px;
+  }
+
+  /* Wedge progress bar */
+  .wedges {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin: 18px 0 6px;
+  }
+  .wedge {
+    border: 2px solid var(--todo-border);
+    background: var(--todo-bg);
+    border-radius: 8px;
+    padding: 14px 16px 16px;
+    position: relative;
+  }
+  .wedge.done   { border-color: var(--done-border); background: var(--done-bg); }
+  .wedge.wip    { border-color: var(--wip-border);  background: var(--wip-bg); }
+  .wedge.todo   { border-color: var(--todo-border); background: var(--todo-bg); }
+  .wedge .num {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+  }
+  .wedge.done .num { color: var(--done); }
+  .wedge.wip  .num { color: var(--wip); }
+  .wedge .title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--ink);
+    margin-top: 4px;
+  }
+  .wedge .state {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+  .wedge.done .state { color: var(--done); font-weight: 600; }
+  .wedge.wip  .state { color: var(--wip);  font-weight: 600; }
+  .progress {
+    height: 6px;
+    background: rgba(15,23,42,0.08);
+    border-radius: 3px;
+    margin-top: 10px;
+    overflow: hidden;
+  }
+  .progress > span {
+    display: block;
+    height: 100%;
+    background: var(--done);
+    border-radius: 3px;
+  }
+  .wedge.wip  .progress > span { background: var(--wip); }
+  .wedge.todo .progress > span { background: var(--todo); }
+
+  /* Architecture diagram */
+  .arch {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 14px;
+    background: #fafbfc;
+    overflow-x: auto;
+  }
+  .arch-row {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0;
+  }
+  .arch-row.three { grid-template-columns: 1fr auto 1fr auto 1fr; }
+  .node {
+    border: 2px solid var(--todo-border);
+    background: var(--todo-bg);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  .node.done    { border-color: var(--done-border);    background: var(--done-bg); }
+  .node.wip     { border-color: var(--wip-border);     background: var(--wip-bg); }
+  .node.blocked { border-color: var(--blocked-border); background: var(--blocked-bg); }
+  .node .title { font-weight: 700; color: var(--ink); font-size: 13.5px; }
+  .node .sub   { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .node code   { background: rgba(15,23,42,0.05); padding: 1px 5px; border-radius: 3px; font-size: 11.5px; color: var(--ink); }
+  .arrow {
+    color: var(--muted);
+    font-size: 18px;
+    text-align: center;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* Checklist */
+  .checklist {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0;
+  }
+  .checklist li {
+    padding: 6px 0 6px 28px;
+    position: relative;
+    font-size: 13.5px;
+  }
+  .checklist li:before {
+    position: absolute;
+    left: 0;
+    top: 6px;
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    text-align: center;
+    line-height: 18px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .checklist li.done:before    { content: "✓"; background: var(--done);    color: white; }
+  .checklist li.wip:before     { content: "·"; background: var(--wip);     color: white; }
+  .checklist li.todo:before    { content: "";  background: white;          border: 2px solid var(--todo-border); }
+  .checklist li.blocked:before { content: "!"; background: var(--blocked); color: white; }
+  .checklist li code {
+    background: #f1f5f9;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12.5px;
+  }
+  .checklist .note {
+    color: var(--muted);
+    font-size: 12.5px;
+    display: block;
+    margin-top: 2px;
+  }
+
+  /* Legend */
+  .legend {
+    display: flex;
+    gap: 12px;
+    margin: 10px 0 18px;
+    font-size: 12.5px;
+    color: var(--muted);
+    flex-wrap: wrap;
+  }
+  .legend .item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .legend .swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 2px solid var(--todo-border);
+    background: var(--todo-bg);
+    display: inline-block;
+  }
+  .legend .swatch.done    { border-color: var(--done-border);    background: var(--done-bg); }
+  .legend .swatch.wip     { border-color: var(--wip-border);     background: var(--wip-bg); }
+  .legend .swatch.todo    { border-color: var(--todo-border);    background: var(--todo-bg); }
+  .legend .swatch.blocked { border-color: var(--blocked-border); background: var(--blocked-bg); }
+
+  /* Two-column layout */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .card {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 14px 18px;
+    background: #fafbfc;
+  }
+  .card h3 { margin-top: 0; font-size: 14.5px; color: var(--ink); }
+
+  /* Changelog */
+  .changelog { font-size: 13px; }
+  .changelog .row {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    gap: 12px;
+    padding: 5px 0;
+    border-bottom: 1px dashed #e2e8f0;
+  }
+  .changelog .row:last-child { border-bottom: none; }
+  .changelog .date { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+  .small { font-size: 12px; color: var(--muted); }
+  hr { border: none; border-top: 1px dashed #cbd5e1; margin: 22px 0; }
+</style>
+</head>
+<body>
+
+<h1>CRM Self-Repair — Status Board</h1>
+<p class="meta">
+  <strong>Last updated:</strong> 2026-05-24 by Chris's Claude after commit <code>6432adc</code> &middot;
+  <strong>Current wedge:</strong> 1 (code-complete; pending deploy) &middot;
+  <strong>Repo:</strong> <a href="https://github.com/DAAIDev/AgentBoxDev">DAAIDev/AgentBoxDev</a>
+</p>
+
+<div class="legend">
+  <span class="item"><span class="swatch done"></span> Done &amp; verified</span>
+  <span class="item"><span class="swatch wip"></span> In progress</span>
+  <span class="item"><span class="swatch todo"></span> Not started</span>
+  <span class="item"><span class="swatch blocked"></span> Blocked on human</span>
+</div>
+
+<!-- ===================================================================== -->
+<h2>Wedge progress</h2>
+
+<div class="wedges">
+
+  <div class="wedge wip">
+    <div class="num">Wedge 1</div>
+    <div class="title">Schema + Triage worker</div>
+    <div class="state">~95% — code done, awaiting deploy</div>
+    <div class="progress"><span style="width: 95%"></span></div>
+  </div>
+
+  <div class="wedge todo">
+    <div class="num">Wedge 2</div>
+    <div class="title">Implementer Action</div>
+    <div class="state">Not started</div>
+    <div class="progress"><span style="width: 0%"></span></div>
+  </div>
+
+  <div class="wedge todo">
+    <div class="num">Wedge 3</div>
+    <div class="title">Reviewer Action</div>
+    <div class="state">Not started</div>
+    <div class="progress"><span style="width: 0%"></span></div>
+  </div>
+
+  <div class="wedge todo">
+    <div class="num">Wedge 4</div>
+    <div class="title">Rework + polish</div>
+    <div class="state">Not started</div>
+    <div class="progress"><span style="width: 0%"></span></div>
+  </div>
+
+</div>
+
+<p class="small">Total estimate: ~4-5 weeks. See <a href="./crm-self-repair-plan-for-adam-2026-05-24.html">build plan v0.3.2</a> for details per wedge.</p>
+
+<!-- ===================================================================== -->
+<h2>End-to-end pipeline — what's live vs not</h2>
+
+<div class="arch">
+
+  <div class="arch-row three">
+    <div class="node done">
+      <div class="title">Tenant CRM submits</div>
+      <div class="sub">CRMFrontEnd · TaskCreateForm.tsx → webhook</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="node done">
+      <div class="title">AgentBoxDev intake</div>
+      <div class="sub"><code>POST /api/feedback-tasks/webhook</code> → <code>mcp_feedback_tasks</code></div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="node done">
+      <div class="title">DB schema</div>
+      <div class="sub">Migration 001 applied · 4 new tables · 14 new columns</div>
+    </div>
+  </div>
+
+  <div class="arch-row three">
+    <div class="node wip">
+      <div class="title">Triage worker</div>
+      <div class="sub"><code>triage.mjs</code> · Sonnet 4.6 · BUG-only · code-complete, awaiting deploy with <code>ENABLE_TRIAGE_WORKER=true</code></div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="node wip">
+      <div class="title">1-2 GitHub issues</div>
+      <div class="sub">With synthesized bug + proposed fix + acceptance + reproducer + test stub. Will fire once deployed.</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="node todo">
+      <div class="title">Implementer Action (Wedge 2)</div>
+      <div class="sub">GitHub Action triggered by <code>agent-eligible</code> label · pushes <code>agent/*</code> branch</div>
+    </div>
+  </div>
+
+  <div class="arch-row three">
+    <div class="node todo">
+      <div class="title">Reviewer Action (Wedge 3)</div>
+      <div class="sub">3 checks: security · feature-flag · regression+additive · PR body = structured report</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="node todo">
+      <div class="title">PR opens against <code>dev</code></div>
+      <div class="sub">One PR per in-scope repo. Branch protection rules required first.</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="node todo">
+      <div class="title">Human merges</div>
+      <div class="sub">Chris reviews → merges to <code>dev</code> → CI deploys → eventual <code>dev</code>→<code>main</code> promotion</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ===================================================================== -->
+<h2>Wedge 1 — what got built (current focus)</h2>
+
+<div class="two-col">
+
+  <div class="card">
+    <h3>Code shipped</h3>
+    <ul class="checklist">
+      <li class="done">Migration <code>001_self_repair_pipeline.sql</code> applied to <code>agentbox-db-mcp</code><span class="note">4 new tables (mcp_feedback_task_issues, agent_runs, agent_run_prs, agent_run_events) + 14 new columns on mcp_feedback_tasks</span></li>
+      <li class="done"><code>prompts/triage.system.md</code> production-ready<span class="note">~400 lines. BUG-only short-circuit. Outputs synthesized_bug + proposed_fix.</span></li>
+      <li class="done"><code>tools/github.mjs</code><span class="note">ghSearchCode + ghGetFile + createGitHubIssue + Anthropic tool defs + dispatcher. Smoke-tested live.</span></li>
+      <li class="done"><code>triage.mjs</code><span class="note">triageFeedbackTask(taskId, pool) + safetyPollTriage(pool). Full agentic loop, JSON plan validation, persist + open 1-2 issues.</span></li>
+      <li class="done"><code>server.js</code> wiring<span class="note">Webhook fires setImmediate(triageFeedbackTask). Safety poller on setInterval. Both gated by ENABLE_TRIAGE_WORKER env var.</span></li>
+      <li class="done">Collaboration scaffolding (CLAUDE.md, PIPELINE_STATUS.md, WEDGE_ISSUES.md, AGENT_LOOP_COLLABORATION.md, .claude/settings.json auto-pull hook, ADR 0001 decided)</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Remaining for Wedge 1 exit gate</h3>
+    <ul class="checklist">
+      <li class="blocked">Rotate <code>GITHUB_TOKEN</code> in Cloud Run secrets<span class="note">Local .env token is expired. Existing kanban-github-sync flow is also affected if prod is stale.</span></li>
+      <li class="blocked">Deploy AgentBoxDev with <code>ENABLE_TRIAGE_WORKER=true</code><span class="note">Cloud Run env update + redeploy. No code changes needed.</span></li>
+      <li class="blocked">File a test BUG in the dev tenant<span class="note">Exit gate: within 60s, row.state='planned', 1-2 mcp_feedback_task_issues rows, 1-2 issues opened in CRMBackend/CRMFrontEnd with the new structured body.</span></li>
+    </ul>
+  </div>
+
+</div>
+
+<!-- ===================================================================== -->
+<h2>Wedge 2 prerequisites (your plate, parallel-doable)</h2>
+
+<ul class="checklist">
+  <li class="blocked">Create dedicated GitHub App <code>boxai-self-repair-agent</code><span class="note">Per <a href="https://github.com/DAAIDev/AgentBoxDev/blob/main/decisions/0001-agent-github-identity.md">ADR 0001</a>. Scope: CRMBackend + CRMFrontEnd. Permissions: Contents (read+write on agent/*), Pull requests (write), Issues (write). Store private key + app id as Actions secrets.</span></li>
+  <li class="blocked">Configure branch protection on <code>main</code> + <code>dev</code> in CRMBackend + CRMFrontEnd<span class="note">main: agent App denied write. dev: agent can open PRs but cannot push directly. Both: required reviews = 1, no force-push, no deletions.</span></li>
+  <li class="blocked">Decide on stale <code>dev</code> branches<span class="note">Both CRM repos have a dev branch but last commit was ~March 2026. Fast-forward to main, or treat as integration branch that diverges intentionally.</span></li>
+</ul>
+
+<p class="small">None of these block Wedge 1. They block Wedge 2.</p>
+
+<!-- ===================================================================== -->
+<h2>Recent activity</h2>
+
+<div class="changelog">
+  <div class="row">
+    <span class="date">2026-05-24</span>
+    <span><strong>Wedge 1 code-complete</strong> · <code>6432adc</code> — triage.mjs worker + safety poller + server.js wiring (gated by ENABLE_TRIAGE_WORKER)</span>
+  </div>
+  <div class="row">
+    <span class="date">2026-05-24</span>
+    <span><strong>tools/github.mjs shipped</strong> · <code>38bd7c8</code> — ghSearchCode + ghGetFile + Anthropic tool defs. Smoke-tested live against CRMBackend.</span>
+  </div>
+  <div class="row">
+    <span class="date">2026-05-24</span>
+    <span><strong>BUG-only scope wired</strong> · <code>eb5aa93</code> — FEATURE_REQUEST/IMPROVEMENT/QUESTION short-circuited at the worker</span>
+  </div>
+  <div class="row">
+    <span class="date">2026-05-24</span>
+    <span><strong>Migration 001 applied</strong> · <code>3ba3334</code> — 4 new tables + 14 new columns. Verified live.</span>
+  </div>
+  <div class="row">
+    <span class="date">2026-05-24</span>
+    <span><strong>ADR 0001 decided</strong> · <code>c80bb53</code> — GitHub App (not PAT, not default token)</span>
+  </div>
+  <div class="row">
+    <span class="date">2026-05-24</span>
+    <span><strong>PR #5 merged</strong> · <code>b7d1ed3</code> — collaboration scaffolding (CLAUDE.md, PIPELINE_STATUS, WEDGE_ISSUES, SOP, decisions/, prompts/, docs/)</span>
+  </div>
+</div>
+
+<hr>
+
+<p class="small">
+  This board is a manual snapshot — both Claude sessions (Chris's + Adam's) update it as part of the commit flow.
+  For the authoritative source of state, see <a href="../PIPELINE_STATUS.md">PIPELINE_STATUS.md</a>.
+  For the build plan, see <a href="./crm-self-repair-plan-for-adam-2026-05-24.html">crm-self-repair-plan-for-adam-2026-05-24.html</a>.
+</p>
+
+</body>
+</html>
