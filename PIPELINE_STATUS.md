@@ -6,9 +6,9 @@
 > - **Keep it scannable** — three weeks from now this should still be readable in 30 seconds.
 > - When a wedge closes, move "Done" items into the cumulative changelog and reset the active sections for the next wedge.
 
-**Last updated:** 2026-05-25 by Chris's Claude (blocker state re-verified)
-**Current wedge:** 1 → exit gate hit; ready to flip to prod or move to Wedge 2
-**ETA:** 2026-06-02 (running ahead of plan)
+**Last updated:** 2026-05-26 by Chris's Claude (Wedge 1 LIVE IN PROD)
+**Current wedge:** 1 LIVE → ready to start Wedge 2
+**ETA:** 2026-06-02 (running well ahead of plan)
 
 ---
 
@@ -45,17 +45,20 @@
 - [x] ~~**Configure branch protection**~~ — Done 2026-05-25. All 4 branches (main+dev in both CRM repos) now protected: PR required (0 approvals — solo merge still works), no force-push, no deletion, `enforce_admins=false` (override path preserved). Effectively "no one — including the agent App — can push directly to main or dev; everything goes through PR."
 - [x] ~~**Fast-forward stale `dev` branches**~~ — Done 2026-05-25. `git push origin main:dev` against both repos. CRMBackend dev: `56fe08f` (Mar 3) → `8201091` (May 25). CRMFrontEnd dev: `2d652b47` (Mar 3) → `92098572` (May 25). Zero unique commits lost on either side.
 - [x] ~~**Create GitHub App `boxai-self-repair-agent`**~~ — Done 2026-05-25. App id `3864871`, installation id `135662974`. Credentials in GCP Secret Manager + Actions secrets in both CRM repos. Installation `repository_selection=all` — broader than designed but acceptable; can re-scope at github.com/organizations/DAAITeam/settings/installations/135662974.
-- [ ] **Wire AgentBoxDev `tools/github.mjs` + `server.js` to mint installation tokens** instead of using the dead `GITHUB_TOKEN`. ~50 lines: a `getInstallationToken()` helper that signs a JWT with the App PEM, exchanges for an installation token, caches with TTL refresh. Replace 2 call sites. After this, `ENABLE_TRIAGE_WORKER=true` can be flipped on Cloud Run.
+- [x] ~~**Wire AgentBoxDev `tools/github.mjs` + `server.js` to mint installation tokens**~~ — Done 2026-05-26 (`31d3569`). `tools/githubAuth.mjs` adds `getGitHubToken()` that signs a JWT with the App PEM, mints an installation token, caches until ~60s before expiry. Two `callGitHub` call sites refactored to await it. PAT fallback preserved for local dev. Smoke-tested end-to-end against live App: get-file ✓, search ✓, issues-list 200 ✓, caching ✓.
+- [x] ~~**Deploy + flip `ENABLE_TRIAGE_WORKER=true`**~~ — Done 2026-05-26. Cloud Run `mcp-server` revision `mcp-server-00065-2px` serving 100% traffic. Boot log: `[triage-poller] starting; tick every 60000ms`. New env vars wired from GCP secrets: `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID`. **Wedge 1 is live in prod.**
 - [x] ~~**Top up Anthropic account / verify API key**~~ — **Verified 2026-05-25**: Cloud Run secret `mcp-anthropic-api-key` accepts a live `/v1/messages` call against `claude-haiku-4-5-20251001`. Funded. Local `.env` was the only stale one.
 
-### Next (after Wedge 1 exit gate)
-- ~~Configure branch protection on `main` + `dev` in both CRM repos~~ ✅ done 2026-05-25
-- ~~Fast-forward stale `dev` branches~~ ✅ done 2026-05-25
-- **Create the GitHub App `boxai-self-repair-agent` per ADR 0001** ← next critical-path item (Chris, browser flow)
-- Open Wedge 2 issue from [WEDGE_ISSUES.md](./WEDGE_ISSUES.md)
+### Next (Wedge 2 startup)
+- ~~Configure branch protection on `main` + `dev` in both CRM repos~~ ✅ 2026-05-25
+- ~~Fast-forward stale `dev` branches~~ ✅ 2026-05-25
+- ~~Create the GitHub App `boxai-self-repair-agent` per ADR 0001~~ ✅ 2026-05-25 (id 3864871)
+- ~~Refactor triage worker auth to App tokens + deploy~~ ✅ 2026-05-26
+- **Open Wedge 2 issue from [WEDGE_ISSUES.md](./WEDGE_ISSUES.md)** ← next critical-path item
 - Copy [docs/drafts/](./docs/drafts/) files into CRMBackend + CRMFrontEnd (workflows + setup-ci.sh + agent-runner.mjs)
 - Adapt setup-ci.sh per repo (auto-detect works for most cases; tweak as needed)
 - Vendor the implementer + reviewer prompts into each CRM repo at `.claude/agent-prompts/`
+- File a dev-tenant test BUG to fire the full pipeline end-to-end
 
 ---
 
