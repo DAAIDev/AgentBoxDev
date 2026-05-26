@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Wedge 1 Shipped — Self-Repair Pipeline</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #7d8590;
+    --green: #3fb950;
+    --green-dim: #1a3622;
+    --red: #f85149;
+    --red-dim: #3d1c1c;
+    --amber: #d29922;
+    --amber-dim: #3a2d10;
+    --blue: #58a6ff;
+    --blue-dim: #0d2a4a;
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "SF Pro Display", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    padding: 40px 20px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 56px; }
+  header .eyebrow {
+    color: var(--green); font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase;
+    font-weight: 600; margin-bottom: 12px;
+  }
+  header h1 { font-size: 44px; margin: 0 0 12px; font-weight: 700; letter-spacing: -0.02em; }
+  header .sub { color: var(--muted); font-size: 16px; }
+
+  section { margin-bottom: 56px; }
+  section h2 {
+    font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+    margin: 0 0 20px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Before/After grid */
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .ba-col h3 {
+    font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+    margin: 0 0 12px; font-weight: 600;
+  }
+  .ba-col.before h3 { color: var(--red); }
+  .ba-col.after h3 { color: var(--green); }
+  .row {
+    display: flex; align-items: flex-start; gap: 12px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 14px 16px; margin-bottom: 8px;
+  }
+  .row .icon {
+    flex: 0 0 22px; height: 22px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; margin-top: 2px;
+  }
+  .row.red .icon { background: var(--red-dim); color: var(--red); }
+  .row.green .icon { background: var(--green-dim); color: var(--green); }
+  .row.amber .icon { background: var(--amber-dim); color: var(--amber); }
+  .row .body { flex: 1; font-size: 14px; }
+  .row .body strong { display: block; margin-bottom: 2px; font-size: 14px; }
+  .row .body .meta { color: var(--muted); font-size: 12.5px; }
+
+  /* Architecture diagram */
+  .arch {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 32px; overflow-x: auto;
+  }
+  .arch svg { display: block; margin: 0 auto; }
+  .legend {
+    display: flex; gap: 24px; justify-content: center; margin-top: 20px;
+    font-size: 13px; color: var(--muted); flex-wrap: wrap;
+  }
+  .legend .dot { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 8px; vertical-align: middle; }
+
+  /* Timeline */
+  .timeline { position: relative; padding-left: 32px; }
+  .timeline::before {
+    content: ''; position: absolute; left: 11px; top: 6px; bottom: 6px;
+    width: 2px; background: var(--border);
+  }
+  .step { position: relative; margin-bottom: 24px; }
+  .step::before {
+    content: ''; position: absolute; left: -28px; top: 6px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--green); border: 3px solid var(--bg);
+    box-shadow: 0 0 0 1px var(--green);
+  }
+  .step .when { font-size: 12px; color: var(--muted); margin-bottom: 2px; letter-spacing: 0.04em; }
+  .step h4 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  .step .what { font-size: 13.5px; color: var(--muted); }
+  .step .what code {
+    background: var(--bg); padding: 1px 6px; border-radius: 3px;
+    font-size: 12px; color: var(--blue);
+  }
+
+  /* Stats grid */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 16px;
+  }
+  .stat .label {
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 6px;
+  }
+  .stat .value {
+    font-family: ui-monospace, "SF Mono", monospace; font-size: 18px;
+    color: var(--blue); font-weight: 600;
+  }
+  .stat.green .value { color: var(--green); }
+  .stat.purple .value { color: var(--purple); }
+  .stat.amber .value { color: var(--amber); }
+
+  /* Resources */
+  .res { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .res .item {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 14px 16px; font-size: 13.5px;
+  }
+  .res .item h5 {
+    margin: 0 0 6px; font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600;
+  }
+  .res .item ul { margin: 0; padding-left: 20px; }
+  .res .item li { margin-bottom: 4px; }
+  .res code {
+    font-family: ui-monospace, monospace; font-size: 12px;
+    background: var(--bg); padding: 2px 6px; border-radius: 3px;
+    color: var(--purple);
+  }
+
+  /* Next */
+  .next {
+    background: linear-gradient(135deg, var(--blue-dim), var(--panel));
+    border: 1px solid var(--blue); border-radius: 8px; padding: 24px;
+  }
+  .next h3 { margin: 0 0 8px; color: var(--blue); font-size: 16px; }
+  .next ol { margin: 12px 0 0; padding-left: 24px; font-size: 14px; }
+  .next ol li { margin-bottom: 6px; color: var(--muted); }
+  .next ol li strong { color: var(--text); }
+
+  footer {
+    text-align: center; color: var(--muted); font-size: 12px;
+    margin-top: 56px; padding-top: 24px; border-top: 1px solid var(--border);
+  }
+  footer code { color: var(--blue); font-family: ui-monospace, monospace; }
+
+  @media (max-width: 720px) {
+    .ba, .stats, .res { grid-template-columns: 1fr; }
+    header h1 { font-size: 32px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">✓ Shipped 2026-05-26 04:58 UTC</div>
+  <h1>Wedge 1 — Closing the Loop</h1>
+  <div class="sub">Self-repair pipeline triage worker is live in production.</div>
+</header>
+
+<section>
+  <h2>State Change</h2>
+  <div class="ba">
+    <div class="ba-col before">
+      <h3>Before this session</h3>
+      <div class="row red"><div class="icon">✗</div><div class="body"><strong>Wedge 1 code dormant</strong><div class="meta">Built but <code>ENABLE_TRIAGE_WORKER</code> unset on Cloud Run</div></div></div>
+      <div class="row red"><div class="icon">✗</div><div class="body"><strong>GITHUB_TOKEN expired</strong><div class="meta">Cloud Run secret returned 401 Bad credentials</div></div></div>
+      <div class="row red"><div class="icon">✗</div><div class="body"><strong>4 branches unprotected</strong><div class="meta">main + dev in both CRM repos: zero rules</div></div></div>
+      <div class="row red"><div class="icon">✗</div><div class="body"><strong>dev branches stale</strong><div class="meta">Last commit Mar 3; 1053 commits behind main</div></div></div>
+      <div class="row red"><div class="icon">✗</div><div class="body"><strong>No GitHub App</strong><div class="meta">ADR 0001 decided "use App"; nothing existed</div></div></div>
+    </div>
+    <div class="ba-col after">
+      <h3>After this session</h3>
+      <div class="row green"><div class="icon">✓</div><div class="body"><strong>Triage worker LIVE</strong><div class="meta">Revision <code>mcp-server-00065-2px</code>, polling every 60s</div></div></div>
+      <div class="row green"><div class="icon">✓</div><div class="body"><strong>App-token auth wired</strong><div class="meta">JWT → installation token, auto-refresh, cached</div></div></div>
+      <div class="row green"><div class="icon">✓</div><div class="body"><strong>Branch protection on 4 branches</strong><div class="meta">PR required, no force-push, no deletion</div></div></div>
+      <div class="row green"><div class="icon">✓</div><div class="body"><strong>dev = main in both repos</strong><div class="meta">Fast-forwarded; agent branches off live code</div></div></div>
+      <div class="row green"><div class="icon">✓</div><div class="body"><strong>GitHub App installed</strong><div class="meta">id <code>3864871</code>, installation <code>135662974</code></div></div></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Live Pipeline — Data Flow</h2>
+  <div class="arch">
+    <svg width="100%" height="430" viewBox="0 0 1000 430" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 Z" fill="#7d8590"/>
+        </marker>
+        <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 Z" fill="#3fb950"/>
+        </marker>
+        <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 Z" fill="#58a6ff"/>
+        </marker>
+      </defs>
+
+      <!-- Tenant -->
+      <rect x="20" y="180" width="140" height="70" rx="8" fill="#0d2a4a" stroke="#58a6ff" stroke-width="1.5"/>
+      <text x="90" y="208" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">Tenant CRM</text>
+      <text x="90" y="227" text-anchor="middle" fill="#7d8590" font-size="11">user reports a BUG</text>
+      <text x="90" y="241" text-anchor="middle" fill="#7d8590" font-size="11">via Feedback widget</text>
+
+      <!-- mcp_feedback_tasks DB -->
+      <rect x="210" y="180" width="160" height="70" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+      <text x="290" y="206" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">mcp_feedback_tasks</text>
+      <text x="290" y="223" text-anchor="middle" fill="#7d8590" font-size="11">Postgres on Cloud SQL</text>
+      <text x="290" y="240" text-anchor="middle" fill="#bc8cff" font-size="11" font-family="ui-monospace,monospace">state: pending</text>
+
+      <!-- AgentBoxDev triage -->
+      <rect x="420" y="160" width="200" height="110" rx="8" fill="#1a3622" stroke="#3fb950" stroke-width="2"/>
+      <text x="520" y="186" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="700">AgentBoxDev</text>
+      <text x="520" y="203" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">Cloud Run mcp-server</text>
+      <line x1="436" y1="212" x2="604" y2="212" stroke="#30363d"/>
+      <text x="520" y="228" text-anchor="middle" fill="#7d8590" font-size="11" font-family="ui-monospace,monospace">triageFeedbackTask()</text>
+      <text x="520" y="244" text-anchor="middle" fill="#7d8590" font-size="11" font-family="ui-monospace,monospace">safetyPollTriage(60s)</text>
+      <text x="520" y="260" text-anchor="middle" fill="#3fb950" font-size="11">⚡ LIVE</text>
+
+      <!-- Claude Sonnet -->
+      <rect x="680" y="60" width="160" height="80" rx="8" fill="#2d1b4a" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="760" y="86" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">Claude Sonnet 4.5</text>
+      <text x="760" y="103" text-anchor="middle" fill="#7d8590" font-size="11">+ gh_search_code</text>
+      <text x="760" y="118" text-anchor="middle" fill="#7d8590" font-size="11">+ gh_get_file</text>
+      <text x="760" y="133" text-anchor="middle" fill="#bc8cff" font-size="10.5">agentic loop, 40 turns max</text>
+
+      <!-- GitHub App -->
+      <rect x="680" y="180" width="160" height="80" rx="8" fill="#1a3622" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="760" y="206" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">GitHub App</text>
+      <text x="760" y="223" text-anchor="middle" fill="#7d8590" font-size="11">boxai-self-repair-agent</text>
+      <text x="760" y="240" text-anchor="middle" fill="#7d8590" font-size="11" font-family="ui-monospace,monospace">app_id 3864871</text>
+      <text x="760" y="255" text-anchor="middle" fill="#3fb950" font-size="10.5">installation 135662974</text>
+
+      <!-- CRMBackend issue -->
+      <rect x="680" y="300" width="160" height="90" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
+      <text x="760" y="326" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">GitHub Issue</text>
+      <text x="760" y="343" text-anchor="middle" fill="#7d8590" font-size="11">CRMBackend or CRMFrontEnd</text>
+      <text x="760" y="358" text-anchor="middle" fill="#d29922" font-size="10.5">labels: agent-eligible,</text>
+      <text x="760" y="371" text-anchor="middle" fill="#d29922" font-size="10.5">tenant:X, area:Y, type:bug</text>
+      <text x="760" y="385" text-anchor="middle" fill="#7d8590" font-size="10">structured body + test stub</text>
+
+      <!-- DB write back -->
+      <rect x="210" y="320" width="160" height="70" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+      <text x="290" y="346" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">mcp_feedback_tasks</text>
+      <text x="290" y="363" text-anchor="middle" fill="#7d8590" font-size="11">+ mcp_feedback_task_issues</text>
+      <text x="290" y="380" text-anchor="middle" fill="#bc8cff" font-size="11" font-family="ui-monospace,monospace">state: triaged</text>
+
+      <!-- Arrows -->
+      <line x1="160" y1="215" x2="205" y2="215" stroke="#7d8590" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <line x1="370" y1="215" x2="415" y2="215" stroke="#7d8590" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <line x1="625" y1="190" x2="675" y2="120" stroke="#bc8cff" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+      <line x1="625" y1="220" x2="675" y2="220" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+      <path d="M 760 260 Q 760 280 760 300" fill="none" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+      <path d="M 520 270 Q 520 360 365 355" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowBlue)"/>
+
+      <!-- Labels on arrows -->
+      <text x="183" y="207" text-anchor="middle" fill="#7d8590" font-size="10">INSERT</text>
+      <text x="393" y="207" text-anchor="middle" fill="#7d8590" font-size="10">claim row</text>
+      <text x="660" y="158" fill="#bc8cff" font-size="10">prompt + tools</text>
+      <text x="635" y="208" fill="#3fb950" font-size="10">mint token</text>
+      <text x="770" y="285" fill="#3fb950" font-size="10">POST /issues</text>
+      <text x="455" y="350" fill="#58a6ff" font-size="10">UPDATE</text>
+
+      <!-- Title -->
+      <text x="500" y="30" text-anchor="middle" fill="#e6edf3" font-size="15" font-weight="600">When a tenant submits feedback, this happens within ~98s</text>
+    </svg>
+    <div class="legend">
+      <span><span class="dot" style="background:#3fb950"></span>Built/refactored this session</span>
+      <span><span class="dot" style="background:#bc8cff"></span>LLM call</span>
+      <span><span class="dot" style="background:#58a6ff"></span>Persistence</span>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>What Got Built — Timeline</h2>
+  <div class="timeline">
+    <div class="step">
+      <div class="when">Step 1 · investigated state</div>
+      <h4>Re-verified all 4 blockers</h4>
+      <div class="what">Confirmed Cloud Run <code>GITHUB_TOKEN</code> dead (401), Anthropic key funded, dev branches had zero unique commits, all 4 branches unprotected.</div>
+    </div>
+    <div class="step">
+      <div class="when">Step 2 · safe-to-execute fixes</div>
+      <h4>Fast-forwarded dev → main + applied branch protection</h4>
+      <div class="what">Both CRM repos: dev now matches main; all 4 branches require PRs, no force-push, no deletion. Admins can override in emergencies.</div>
+    </div>
+    <div class="step">
+      <div class="when">Step 3 · bootstrap helper</div>
+      <h4>Wrote <code>scripts/create-agent-app.mjs</code></h4>
+      <div class="what">~310-line one-shot using the GitHub App Manifest flow: localhost server, auto-submit form, captures callback, exchanges code for App credentials, writes them to GCP + Actions secrets.</div>
+    </div>
+    <div class="step">
+      <div class="when">Step 4 · one browser click</div>
+      <h4>App <code>boxai-self-repair-agent</code> created</h4>
+      <div class="what">id <code>3864871</code>, installed on DAAITeam. Permissions per ADR 0001: contents/PRs/issues write, metadata/actions read. Events: issues, pull_request, push.</div>
+    </div>
+    <div class="step">
+      <div class="when">Step 5 · auth refactor</div>
+      <h4>Added <code>tools/githubAuth.mjs</code> + refactored two call sites</h4>
+      <div class="what"><code>getGitHubToken()</code> signs a JWT, mints an installation token, caches it until ~60s before expiry. PAT fallback preserved for local dev. <code>tools/github.mjs</code> and <code>server.js</code> updated to await it.</div>
+    </div>
+    <div class="step">
+      <div class="when">Step 6 · smoke test</div>
+      <h4>Verified end-to-end against live App</h4>
+      <div class="what">Token minted ✓, cached on second call ✓, <code>gh_get_file</code> ✓, <code>gh_search_code</code> ✓, issues list 200 ✓.</div>
+    </div>
+    <div class="step">
+      <div class="when">Step 7 · ship</div>
+      <h4>Cloud Run env updated → new revision serving 100%</h4>
+      <div class="what">3 new App-credential secrets bound, <code>ENABLE_TRIAGE_WORKER=true</code>. Revision <code>mcp-server-00065-2px</code> healthy. Boot log: <code>[triage-poller] starting; tick every 60000ms</code>.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Live in Production</h2>
+  <div class="stats">
+    <div class="stat green"><div class="label">Cloud Run revision</div><div class="value">mcp-server-00065-2px</div></div>
+    <div class="stat"><div class="label">GitHub App ID</div><div class="value">3864871</div></div>
+    <div class="stat purple"><div class="label">Installation ID</div><div class="value">135662974</div></div>
+    <div class="stat amber"><div class="label">Poll tick</div><div class="value">every 60s</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Where things live</h2>
+  <div class="res">
+    <div class="item">
+      <h5>GCP Secret Manager (agentbox-485618)</h5>
+      <ul>
+        <li><code>mcp-github-app-id</code></li>
+        <li><code>mcp-github-app-private-key</code></li>
+        <li><code>mcp-github-app-installation-id</code></li>
+        <li><code>mcp-github-app-client-id</code></li>
+        <li><code>mcp-github-app-client-secret</code></li>
+        <li><code>mcp-github-app-webhook-secret</code></li>
+      </ul>
+    </div>
+    <div class="item">
+      <h5>Actions secrets (both CRM repos)</h5>
+      <ul>
+        <li><code>AGENT_GH_APP_ID</code></li>
+        <li><code>AGENT_GH_APP_PRIVATE_KEY</code></li>
+      </ul>
+      <h5 style="margin-top:12px">Branch protection</h5>
+      <ul>
+        <li>CRMBackend/main · CRMBackend/dev</li>
+        <li>CRMFrontEnd/main · CRMFrontEnd/dev</li>
+      </ul>
+    </div>
+    <div class="item">
+      <h5>Commits pushed (DAAIDev/AgentBoxDev)</h5>
+      <ul>
+        <li><code>eb817ed</code> — verified blocker state</li>
+        <li><code>6cba558</code> — bootstrap script</li>
+        <li><code>aaa51a1</code> — App created + installed</li>
+        <li><code>31d3569</code> — App-token auth refactor</li>
+        <li><code>38edaf0</code> — Wedge 1 SHIPPED</li>
+      </ul>
+    </div>
+    <div class="item">
+      <h5>Repo writes (DAAITeam)</h5>
+      <ul>
+        <li>CRMBackend: dev fast-forwarded (<code>56fe08f → 8201091</code>)</li>
+        <li>CRMFrontEnd: dev fast-forwarded (<code>2d652b47 → 92098572</code>)</li>
+        <li>Both: branch protection applied to main + dev</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="next">
+    <h3>Next session — Wedge 2 startup</h3>
+    <p style="margin:0 0 8px;color:var(--muted);font-size:14px">
+      The triage worker now turns bugs into well-shaped issues. Wedge 2 closes the next gap:
+      auto-implement the fix, open a PR against <code style="background:#000;padding:2px 6px;border-radius:3px;color:var(--blue);font-family:ui-monospace,monospace;font-size:12px">dev</code>, and a reviewer agent gates whether it merges.
+    </p>
+    <ol>
+      <li><strong>Paste</strong> <code style="background:#000;padding:2px 6px;border-radius:3px;color:var(--purple);font-family:ui-monospace,monospace;font-size:12px">docs/drafts/{agent-implement.yml, agent-review.yml, agent-runner.mjs, setup-ci.sh.template}</code> into both CRM repos.</li>
+      <li><strong>Adapt</strong> <code style="background:#000;padding:2px 6px;border-radius:3px;color:var(--purple);font-family:ui-monospace,monospace;font-size:12px">setup-ci.sh</code> per repo (NestJS vs Next.js bring-up).</li>
+      <li><strong>Vendor</strong> the implementer + reviewer prompts at <code style="background:#000;padding:2px 6px;border-radius:3px;color:var(--purple);font-family:ui-monospace,monospace;font-size:12px">.claude/agent-prompts/</code>.</li>
+      <li><strong>File a dev-tenant test BUG</strong> and watch the loop close.</li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  Session 2026-05-25 → 2026-05-26 · Self-Repair Pipeline · <code>AgentBoxDev/main@38edaf0</code>
+</footer>
+
+</div>
+</body>
+</html>
