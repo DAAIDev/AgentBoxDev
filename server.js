@@ -11,6 +11,7 @@ import { timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import { createKanbanGithubSync } from './kanban-github-sync.mjs';
 import { triageFeedbackTask, safetyPollTriage } from './triage.mjs';
+import { getGitHubToken } from './tools/githubAuth.mjs';
 
 // Firebase Admin SDK for AgentBox Dashboard user management
 if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
@@ -180,9 +181,7 @@ async function callCRM(company, method, path, body) {
 const GITHUB_ORG = process.env.GITHUB_ORG || 'DAAITeam';
 
 async function callGitHub(path, params = {}, { method = 'GET', body } = {}) {
-  if (!process.env.GITHUB_TOKEN) {
-    throw new Error('GITHUB_TOKEN not configured');
-  }
+  const token = await getGitHubToken();
 
   const url = new URL(`https://api.github.com${path}`);
   if (method === 'GET') {
@@ -198,7 +197,7 @@ async function callGitHub(path, params = {}, { method = 'GET', body } = {}) {
     const resp = await fetch(url.toString(), {
       method,
       headers: {
-        'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
+        'Authorization': `Bearer ${token}`,
         'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),

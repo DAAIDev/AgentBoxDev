@@ -6,11 +6,12 @@
 //   - GH_SEARCH_CODE_TOOL / GH_GET_FILE_TOOL — Anthropic tool definitions
 //   - runTool(name, input) — dispatcher (returns JSON string for tool_result)
 //
-// All calls use process.env.GITHUB_TOKEN (Bearer). Mirrors the
-// callGitHub() pattern in server.js — kept self-contained so the
-// triage worker has no dependency on the larger MCP server module.
+// Auth resolved via tools/githubAuth.getGitHubToken() — supports either a
+// GitHub App installation token (preferred) or a PAT fallback.
 //
 // Repos allow-listed to CRMBackend and CRMFrontEnd. Org pinned to DAAITeam.
+
+import { getGitHubToken } from './githubAuth.mjs';
 
 const GITHUB_API = 'https://api.github.com';
 const GITHUB_ORG = 'DAAITeam';
@@ -20,9 +21,7 @@ const MAX_FILE_LINES = 800; // truncate huge files to keep Claude's context mana
 const SEARCH_PAGE_SIZE = 30;
 
 async function callGitHub(path, params = {}, { method = 'GET', body, accept = 'application/vnd.github+json' } = {}) {
-  if (!process.env.GITHUB_TOKEN) {
-    throw new Error('GITHUB_TOKEN not configured');
-  }
+  const token = await getGitHubToken();
 
   const url = new URL(`${GITHUB_API}${path}`);
   if (method === 'GET') {
@@ -38,7 +37,7 @@ async function callGitHub(path, params = {}, { method = 'GET', body, accept = 'a
     const resp = await fetch(url.toString(), {
       method,
       headers: {
-        'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
+        'Authorization': `Bearer ${token}`,
         'Accept': accept,
         'X-GitHub-Api-Version': '2022-11-28',
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
