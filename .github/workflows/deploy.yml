@@ -82,7 +82,7 @@ jobs:
               MCP_SERVICE_KEY=mcp-service-key:latest" \
             --update-env-vars "^;^\
               NODE_ENV=production;\
-              MCP_AUTH_ENFORCE=false;\
+              MCP_AUTH_ENFORCE=true;\
               GCS_BUCKET=mcp-documents-agentbox;\
               CRM_INSTANCES=dtiq,packetfabric,element8,qwilt,welink,dev;\
               CRM_URL_DTIQ=${{ steps.crm_urls.outputs.CRM_URL_DTIQ }};\
