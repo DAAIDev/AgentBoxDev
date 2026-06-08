@@ -30,6 +30,53 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// ============ AUTH GATE ============
+// Closes the unauthenticated-MCP exposure. Accepts EITHER a valid Firebase ID
+// token (browser/dashboard, per-user) OR the shared service secret (genuine
+// server-to-server callers). When MCP_AUTH_ENFORCE !== 'true' we run in monitor
+// mode: log every anonymous request but allow it through, so callers can be
+// migrated without an outage before enforcement is flipped on.
+const MCP_AUTH_ENFORCE = process.env.MCP_AUTH_ENFORCE === 'true';
+const MCP_SERVICE_KEY = process.env.MCP_SERVICE_KEY || '';
+// Reachable without auth. /health = liveness; / = the public endpoint map.
+const MCP_OPEN_PATHS = new Set(['/health', '/']);
+// Routes that carry their own auth (per-tenant x-webhook-secret) — let them
+// run their existing check instead of the bearer gate.
+const MCP_SELF_AUTHED_PREFIXES = ['/api/feedback-tasks/webhook'];
+
+async function mcpAuthGate(req, res, next) {
+  if (MCP_OPEN_PATHS.has(req.path)) return next();
+  if (MCP_SELF_AUTHED_PREFIXES.some((p) => req.path.startsWith(p))) return next();
+
+  const authz = (req.headers['authorization'] || '').toString();
+  const token = authz.startsWith('Bearer ') ? authz.slice(7).trim() : '';
+  let identity = null;
+
+  if (token && MCP_SERVICE_KEY && constantTimeEquals(token, MCP_SERVICE_KEY)) {
+    identity = { kind: 'service' };
+  }
+  if (!identity && token) {
+    try {
+      const decoded = await admin.auth().verifyIdToken(token);
+      identity = { kind: 'user', uid: decoded.uid, email: decoded.email || null };
+    } catch {
+      /* invalid/expired token — fall through to unauth handling */
+    }
+  }
+
+  if (identity) {
+    req.mcpIdentity = identity;
+    return next();
+  }
+
+  console.warn(
+    `[mcp-auth] UNAUTH ${req.method} ${req.path} ip=${req.ip} hadToken=${!!token} enforce=${MCP_AUTH_ENFORCE}`
+  );
+  if (!MCP_AUTH_ENFORCE) return next();
+  return res.status(401).json({ error: 'Unauthorized' });
+}
+app.use(mcpAuthGate);
+
 // PostgreSQL connection pool
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,

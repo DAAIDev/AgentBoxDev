@@ -78,9 +78,11 @@ jobs:
               FIREBASE_PROJECT_ID=mcp-firebase-project-id:latest,\
               FIREBASE_CLIENT_EMAIL=mcp-firebase-client-email:latest,\
               FIREBASE_PRIVATE_KEY=mcp-firebase-private-key:latest,\
-              GCP_SERVICE_ACCOUNT_JSON=mcp-gcp-service-account:latest" \
+              GCP_SERVICE_ACCOUNT_JSON=mcp-gcp-service-account:latest,\
+              MCP_SERVICE_KEY=mcp-service-key:latest" \
             --update-env-vars "^;^\
               NODE_ENV=production;\
+              MCP_AUTH_ENFORCE=true;\
               GCS_BUCKET=mcp-documents-agentbox;\
               CRM_INSTANCES=dtiq,packetfabric,element8,qwilt,welink,dev;\
               CRM_URL_DTIQ=${{ steps.crm_urls.outputs.CRM_URL_DTIQ }};\
