@@ -38,8 +38,10 @@ app.use(express.json({ limit: '50mb' }));
 // migrated without an outage before enforcement is flipped on.
 const MCP_AUTH_ENFORCE = process.env.MCP_AUTH_ENFORCE === 'true';
 const MCP_SERVICE_KEY = process.env.MCP_SERVICE_KEY || '';
-// Reachable without auth. /health = liveness; / = the public endpoint map.
-const MCP_OPEN_PATHS = new Set(['/health', '/']);
+// Reachable without auth: /health only (liveness probe / public uptime ping).
+// '/' (the endpoint map) is intentionally NOT open — unauth endpoint enumeration
+// is needless info disclosure; authenticated callers still get the map.
+const MCP_OPEN_PATHS = new Set(['/health']);
 // Routes that carry their own auth (per-tenant x-webhook-secret) — let them
 // run their existing check instead of the bearer gate.
 const MCP_SELF_AUTHED_PREFIXES = ['/api/feedback-tasks/webhook'];
