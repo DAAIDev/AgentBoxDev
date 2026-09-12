@@ -41,7 +41,7 @@ jobs:
         id: crm_urls
         run: |
           # Migrated tenants now serve from isolated GCP projects (entbox-crm-*),
-          # so their URLs are pinned here. PacketFabric + dev stay on agentbox-485618
+          # so their URLs are pinned here. PacketFabric is pinned to its pf-crm-490422 backend (stale agentbox-485618 duplicate being decommissioned, F-108); only dev stays on agentbox-485618
           # and are still resolved dynamically. Old crm-backend-{dtiq,qwilt,welink,element8}
           # services are being decommissioned — do NOT resolve them here.
           for company in dtiq packetfabric element8 qwilt welink dev; do
@@ -50,6 +50,7 @@ jobs:
               qwilt)    url="https://qwilt-backend-kdgob74hbq-uc.a.run.app" ;;
               welink)   url="https://welink-backend-hzmsjnjafa-uc.a.run.app" ;;
               element8) url="https://element8-backend-rrqpammrwq-uc.a.run.app" ;;
+              packetfabric) url="https://crm-backend-packetfabric-wdgqliu5ca-uc.a.run.app" ;;
               *)        url=$(gcloud run services describe crm-backend-${company} \
                           --region $REGION --format 'value(status.url)' 2>/dev/null || echo "") ;;
             esac
